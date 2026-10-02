@@ -1,0 +1,60 @@
+# frpc — the Mac end of the dsh-gateway tunnel.
+#
+# Written by deploy/mac/install.sh to ~/.dsh-gateway/frpc.toml (mode 0600: it
+# holds the tunnel token). Placeholder values are substituted by that script,
+# which refuses to install a file with an unresolved token left in it.
+#
+# Checked against frp v0.71.0 with `frpc verify -c <file>` plus a live
+# frpc↔frps handshake. frp parses TOML in strict mode, so an unknown key is a
+# startup error rather than a warning — re-run `frpc verify` after editing.
+
+serverAddr = "__SERVER_ADDR__"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "__TOKEN__"
+
+# Encrypt the control connection itself (since frp v0.50 this is the default,
+# but it is stated explicitly so that a reader never has to guess). The token
+# crosses this link, so plaintext here would expose it to anyone on the path.
+transport.tls.enable = true
+
+# Do not exit when the first login fails. Default is true, which makes frpc
+# give up if the VPS is still booting or a laptop wakes before Wi-Fi is up;
+# launchd would restart it, but retrying in-process reconnects seconds sooner
+# and produces far less noise in the log.
+loginFailExit = false
+
+# Console logging → the StandardOutPath/StandardErrorPath files in
+# ~/Library/Logs/dsh-gateway/ that the launchd job sets up.
+log.to = "console"
+log.level = "info"
+
+# ---------------------------------------------------------------------------
+# The single proxy: Mac loopback 8787 → VPS loopback 18787.
+#
+# localIP is 127.0.0.1 and not optional: the gateway refuses to start on a
+# non-loopback address, and this keeps the tunnel from being usable to reach
+# anything else on the Mac.
+#
+# transport.useEncryption and transport.useCompression are set *here*, inside
+# the proxy, rather than at the top level. In current frp (verified against
+# v0.71.0, pkg/config/v1: ClientTransportConfig has no UseEncryption/
+# UseCompression fields; ProxyTransport does) these settings only exist
+# per-proxy. Writing `transport.useEncryption = true` at file scope would fail
+# startup under strict parsing, so if you copy this file to an older frp,
+# check the release's full example first.
+#
+# useEncryption adds a second layer over TLS, keyed by the shared token. It is
+# what keeps the *inner* stream unreadable if the TLS link is ever terminated
+# by something other than frps. useCompression is on because the traffic is
+# mostly JSON and terminal output, which compresses well.
+# ---------------------------------------------------------------------------
+[[proxies]]
+name = "dsh-gateway"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8787
+remotePort = 18787
+transport.useEncryption = true
+transport.useCompression = true

@@ -1,0 +1,1649 @@
+/*
+ * dsh-gateway mobile console.
+ *
+ * Every rule lives here. The server's CSP grants `style-src` a nonce and no
+ * 'unsafe-inline', which blocks both the `style="…"` attribute and CSSOM writes
+ * (`el.style.setProperty`). So there is no dynamic geometry anywhere in this
+ * app: progress is a real <progress>, disclosure is <details open>, growth is
+ * `field-sizing` with a `rows` fallback, and state that would normally be an
+ * inline style is a class toggled by the views.
+ *
+ * Layout is a single flex column of exactly 100dvh so the composer sits on the
+ * bottom edge on every device, with `env(safe-area-inset-*)` on the three edges
+ * that can collide with hardware: the notch, the home bar and the landscape
+ * ears.
+ */
+
+:root {
+  color-scheme: dark light;
+
+  --bg: #0b0f14;
+  --bg-raised: #121821;
+  --bg-sunken: #0e131a;
+  --border: #24303d;
+  --text: #e7edf4;
+  --text-muted: #94a3b3;
+  --accent: #4f8cff;
+  --accent-text: #ffffff;
+  --danger: #ff6b6b;
+  --danger-bg: #2a1418;
+  --warn: #f0b429;
+  --warn-bg: #2a2213;
+  --info-bg: #101d2e;
+  --ok: #4ade80;
+  --shadow: 0 8px 30px rgb(0 0 0 / 45%);
+
+  --gap: 12px;
+  --radius: 12px;
+  --touch: 44px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --bg-raised: #ffffff;
+    --bg-sunken: #eceef2;
+    --border: #d5dae1;
+    --text: #16191d;
+    --text-muted: #5c6673;
+    --accent: #1f5fd0;
+    --accent-text: #ffffff;
+    --danger: #b4232b;
+    --danger-bg: #fdecec;
+    --warn: #8a5a00;
+    --warn-bg: #fdf4e0;
+    --info-bg: #eaf2fe;
+    --ok: #1c7a44;
+    --shadow: 0 8px 30px rgb(15 25 40 / 14%);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* The views toggle this attribute; without the rule, a `display: flex` in a
+   more specific selector would win over the user-agent's `[hidden]`. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  /* `height: 100%` above is the fallback; dvh follows the collapsing URL bar. */
+  min-height: 100dvh;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* A dialog receives focus so screen readers announce it, but it is a container
+   rather than a control: a ring around the whole card is noise, not feedback.
+   The controls inside keep theirs. */
+.sheet:focus,
+.sheet:focus-visible {
+  outline: none;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.skip-link:focus {
+  left: 8px;
+  top: 8px;
+}
+
+/* ------------------------------------------------------------- app shell */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 6px 14px;
+  padding-top: calc(6px + env(safe-area-inset-top));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.app-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.status-pill.status-open {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.status-pill.status-connecting,
+.status-pill.status-closed {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.status-pill.status-offline {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.status-pill.status-unpaired {
+  color: var(--text-muted);
+}
+
+.view-root {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tab-bar {
+  display: flex;
+  flex: 0 0 auto;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* A conversation owns the bottom of the screen: the composer replaces the tab
+   bar, which would otherwise steal 50px from the keyboard's budget. The bar is
+   also absent before pairing, where both links would bounce to the same place. */
+.app-conversation .tab-bar,
+.app-unpaired .tab-bar {
+  display: none;
+}
+
+.tab {
+  flex: 1 1 0;
+  min-height: var(--touch);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.tab.is-current {
+  color: var(--accent);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* ----------------------------------------------------------------- views */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.view-head,
+.conv-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  flex: 0 0 auto;
+}
+
+.view-title,
+.conv-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 650;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.view-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.conv-head-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.conv-sub {
+  margin: 2px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The lease chip.
+ *
+ * Holding the session is the normal state of the conversation screen — opening
+ * a session is what attaches it — so it is a 30px pill in the header rather
+ * than a banner. The explanation and the release button live in a sheet behind
+ * it. The dot is drawn rather than typed so it survives every font stack.
+ */
+.lease-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: transparent;
+  color: var(--warn);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lease-chip:active {
+  background: var(--warn-bg);
+}
+.lease-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 14px calc(20px + env(safe-area-inset-bottom));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+}
+
+/* ---------------------------------------------------------------- pieces */
+
+.card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 0 0 14px;
+}
+
+.card-title {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin: 4px 0;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.rows-plain {
+  border: 0;
+  border-radius: 0;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  min-height: var(--touch);
+  padding: 12px 14px;
+  background: var(--bg-raised);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.row:last-child {
+  border-bottom: 0;
+}
+.row:active {
+  background: var(--bg-sunken);
+}
+/*
+ * A row is two lines now: the session's own words, then where and when and how
+ * much. The old single line put the title and its metadata side by side, which
+ * on a phone left the title a few characters wide and clipped the part a reader
+ * recognises.
+ */
+.row-main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+.row-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.row-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.row-time {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.row-sub {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--touch);
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.setting-row:last-child {
+  border-bottom: 0;
+}
+.setting-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+.setting-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  text-align: right;
+  min-width: 0;
+}
+.device-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.device-meta {
+  flex-basis: 100%;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 650;
+  text-transform: lowercase;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.badge-leased {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.badge-busy {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.badge-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+}
+.badge-error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.group {
+  margin-bottom: 20px;
+}
+.group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.group-name {
+  color: var(--text);
+  text-transform: none;
+  font-size: 0.9rem;
+}
+.group-count,
+.group-path {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.72rem;
+}
+.group-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  flex: 1 1 auto;
+}
+
+.empty {
+  padding: 32px 16px;
+  text-align: center;
+}
+.empty-title {
+  margin: 0 0 6px;
+  font-weight: 650;
+}
+
+.loading {
+  padding: 24px 4px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- alerts */
+
+.alert {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  font-size: 0.85rem;
+}
+.alert-error {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-bg);
+  color: var(--text);
+}
+.alert-warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: var(--warn-bg);
+}
+.alert-info {
+  background: var(--info-bg);
+}
+.alert p {
+  margin: 0 0 8px;
+}
+.alert p:last-child {
+  margin-bottom: 0;
+}
+
+/* --------------------------------------------------------------- buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--touch);
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  /* No hover-only affordance: `:active` carries the feedback on a phone. */
+}
+.btn:active {
+  background: var(--bg-sunken);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.btn-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+.btn-ghost {
+  background: transparent;
+}
+.btn-block {
+  width: 100%;
+  margin-top: 8px;
+}
+.btn-small {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.8rem;
+}
+.btn-icon {
+  min-width: var(--touch);
+  padding: 0;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- fields */
+
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+.field-label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.field-hint {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.input {
+  width: 100%;
+  min-height: var(--touch);
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  /* 16px prevents iOS Safari from zooming the whole page on focus. */
+  font-size: 16px;
+  font-family: inherit;
+}
+.input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.input-code {
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+/* The session id, shown only when the browser refused to copy it. Monospace,
+   because a UUID read off the screen by eye is where 0/O and 1/l get misread;
+   the size stays `.input`'s 16px, which is what keeps iOS from zooming. */
+.input-id {
+  font-family: var(--mono);
+}
+
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--touch);
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.choice.is-disabled {
+  opacity: 0.55;
+}
+.choice-input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.choice-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.choice-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.choice-sub {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ pull refresh */
+
+.pull-hint {
+  height: 0;
+  overflow: hidden;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  opacity: 0;
+}
+.scroll.is-pulling .pull-hint {
+  height: 28px;
+  opacity: 1;
+}
+.scroll.is-armed .pull-hint {
+  color: var(--accent);
+}
+
+/* ----------------------------------------------------------- conversation */
+
+.banners {
+  flex: 0 0 auto;
+  padding: 10px 14px 0;
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+  max-height: 45%;
+  overflow-y: auto;
+}
+
+.older {
+  flex: 0 0 auto;
+  padding: 8px 14px 0;
+}
+
+.log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 14px 8px;
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/*
+ * Rows keep their height; the log scrolls instead.
+ *
+ * A flex item's automatic minimum size only applies while its own overflow is
+ * visible, so a row that clips itself — the tool card is a <details> with
+ * `overflow: hidden` — is free to shrink to nothing once the column is taller
+ * than the viewport. The messages beside it could not shrink (they have no
+ * overflow rule), which made the failure look like "tool calls are missing"
+ * rather than "tool calls are two pixels tall": on a phone, a conversation of
+ * any length showed every tool as a hairline between two message cards, while
+ * the DOM, the API and every test that read them were correct.
+ */
+.log > * {
+  flex: 0 0 auto;
+}
+
+.msg {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.msg-user {
+  background: var(--info-bg);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.msg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.msg-role {
+  flex: 0 0 auto;
+  /* A 390px viewport with "ASSISTANT" plus a model id leaves no slack; without
+     this the label breaks mid-word ("ASSISTAN / T"). */
+  white-space: nowrap;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.msg-time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.msg-model {
+  /* The only part of the header that may shrink: a model id truncates far more
+     gracefully than a role label. */
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-plain {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg-body > :first-child {
+  margin-top: 0;
+}
+.msg-body > :last-child {
+  margin-bottom: 0;
+}
+.usage {
+  margin: 6px 0 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking {
+  margin: 4px 0 8px;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+.thinking-summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.thinking-body {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Markdown */
+
+.md-p {
+  margin: 0 0 8px;
+}
+.md-inline-code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+}
+.md-block {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+.md-code-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+.md-lang {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: lowercase;
+}
+.md-copy {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+}
+.md-pre {
+  margin: 0;
+  padding: 10px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.md-link {
+  color: var(--accent);
+}
+
+/* Tool cards */
+
+.tool {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+.tool-error {
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+.tool-running {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.tool-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--touch);
+  padding: 0 12px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+.tool-name {
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/*
+ * The one-line summary beside the tool name: a path for an edit, the agent's
+ * description for a command. It takes the slack the name and status leave, and
+ * is clipped rather than wrapped so every card stays one line tall — a list of
+ * cards that reflow as the agent works is harder to read than one that clips.
+ */
+.tool-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.tool-status {
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  font-weight: 650;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  /* The status is the one part that must never be ellipsised: "done" is the
+     difference between a card that finished and one that is still working. */
+  margin-left: auto;
+  padding-left: 6px;
+}
+.tool-status-running {
+  color: var(--accent);
+}
+.tool-status-error {
+  color: var(--danger);
+}
+.tool-body {
+  padding: 0 12px 12px;
+}
+.tool-label {
+  margin: 8px 0 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.tool-pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  max-height: 45dvh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+.notice-time {
+  margin-right: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-status {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 2px 14px 6px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- composer */
+
+.composer-wrap {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-raised);
+  padding: 8px 14px calc(8px + env(safe-area-inset-bottom));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--touch);
+  max-height: 40dvh;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: inherit;
+  /* 16px stops iOS Safari from zooming the viewport on focus. */
+  font-size: 16px;
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  /* Progressive enhancement: browsers that support it grow the box to fit the
+     content, including soft-wrapped lines. Elsewhere `rows` (set by the view)
+     is the fallback, because a style attribute is blocked by the CSP. */
+  field-sizing: content;
+}
+
+.composer-send,
+.composer-stop {
+  flex: 0 0 auto;
+}
+
+.counter {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.counter.is-warn {
+  color: var(--warn);
+}
+.counter.is-over {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- footer */
+
+.footer-note {
+  text-align: center;
+  margin-top: 20px;
+}
+
+/* ---------------------------------------------------------------- sheets */
+
+#sheet-host:empty {
+  display: none;
+}
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgb(0 0 0 / 55%);
+  backdrop-filter: blur(2px);
+}
+
+.sheet {
+  width: 100%;
+  max-width: 560px;
+  max-height: 88dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+  box-shadow: var(--shadow);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 8px 8px 16px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-raised);
+}
+.sheet-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 650;
+}
+.sheet-body {
+  padding: 16px;
+}
+
+/* ------------------------------------------------------------- approvals */
+
+.approval-host {
+  position: relative;
+  z-index: 60;
+}
+
+.approval-backdrop {
+  align-items: center;
+  background: rgb(0 0 0 / 72%);
+}
+
+.approval {
+  border-radius: 16px;
+  border-bottom: 1px solid var(--border);
+  border-color: var(--warn);
+  margin: 0 12px;
+  max-width: 560px;
+  padding: 16px;
+}
+
+.approval-head {
+  margin-bottom: 10px;
+}
+.approval-title {
+  margin: 0 0 4px;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+.approval-queue {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.approval-timer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.countdown-text {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--text);
+}
+.is-urgent .countdown-text {
+  color: var(--danger);
+}
+.is-unknown .countdown-bar {
+  display: none;
+}
+
+.countdown-bar {
+  flex: 1 1 auto;
+  height: 8px;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+  accent-color: var(--accent);
+}
+.is-urgent .countdown-bar {
+  accent-color: var(--danger);
+}
+.countdown-bar::-webkit-progress-bar {
+  background: var(--bg-sunken);
+  border-radius: 999px;
+}
+.countdown-bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 999px;
+}
+.countdown-bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 999px;
+}
+
+.approval-input {
+  margin: 0 0 12px;
+  padding: 10px;
+  max-height: 34dvh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------- notice */
+
+.notice-host {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  z-index: 70;
+  max-width: min(92vw, 480px);
+  padding: 0;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 0.82rem;
+  opacity: 0;
+  pointer-events: none;
+}
+.notice-host.is-visible {
+  padding: 8px 16px;
+  opacity: 1;
+}
+
+.noscript {
+  padding: 24px 16px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------ wide screens */
+
+@media (min-width: 720px) {
+  .scroll,
+  .log,
+  .banners,
+  .view-head,
+  .conv-head,
+  .composer-wrap,
+  .older {
+    padding-left: max(24px, env(safe-area-inset-left));
+    padding-right: max(24px, env(safe-area-inset-right));
+  }
+  .sheet-backdrop {
+    align-items: center;
+  }
+  .sheet {
+    border-radius: 16px;
+    border-bottom: 1px solid var(--border);
+    margin: 0 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ------------------------------------------------- session list additions */
+
+/*
+ * The strip that answers "is anything happening" before the list answers "what
+ * exists". It is deliberately small: two labels, and it disappears when there is
+ * nothing to say.
+ */
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.status-item {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+.status-warn {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.status-live {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.section-title {
+  margin: 0 0 6px;
+  padding: 0 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.archived-note {
+  margin: 0 0 10px;
+  padding: 0 2px;
+  font-size: 0.78rem;
+}
+
+.search-bar {
+  margin: 0 0 10px;
+}
+.search-input {
+  width: 100%;
+}
+
+/* A row and its actions side by side: the row opens the session, the button
+   opens the menu, and neither is inside the other. */
+.row-wrap {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+}
+.row-wrap:last-child {
+  border-bottom: 0;
+}
+.row-wrap > .row {
+  flex: 1 1 auto;
+  border-bottom: 0;
+  min-width: 0;
+}
+.row-actions {
+  flex: 0 0 auto;
+  width: 44px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.row-actions:active {
+  background: var(--bg-sunken);
+}
+.row-badges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.row-pin {
+  margin-right: 6px;
+  color: var(--accent);
+}
+.row-title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.row-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ toast */
+
+.toast-host {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(72px + env(safe-area-inset-bottom));
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 0.82rem;
+  pointer-events: auto;
+}
+.toast-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 999px;
+}
+.toast-action:active {
+  background: var(--bg-sunken);
+}
+
+/* ------------------------------------------------------------- tidy sheet */
+
+.tidy-lead {
+  margin: 0;
+  font-weight: 600;
+}
+.tidy-note {
+  margin: 0;
+  font-size: 0.78rem;
+}
+.tidy-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tidy-count {
+  flex: 1 1 auto;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+.tidy-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  max-height: 46dvh;
+  overflow-y: auto;
+}
+.tidy-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.tidy-item:last-child {
+  border-bottom: 0;
+}
+.tidy-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tidy-title {
+  font-size: 0.86rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tidy-sub {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------ receipt sheet */
+/*
+ * A receipt is a list of label/value pairs with one exception — the files, which
+ * can be long and numerous — so the rows are a two-column grid that lets the
+ * value wrap and the label stay put.
+ */
+.receipt-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 0.25rem 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.receipt-row:last-child {
+  border-bottom: none;
+}
+
+.receipt-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.receipt-value {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.receipt-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.receipt-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.receipt-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+
+.receipt-tool-count {
+  color: var(--muted);
+}
+
+.receipt-tool-failed {
+  color: var(--danger);
+  font-size: 0.75rem;
+}
+
+.receipt-files {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.receipt-file {
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------- search inside sessions */
+/*
+ * A transcript result is a row like any other, except that what identifies it is
+ * the sentence around the match rather than a title — so the snippet gets the
+ * space a title normally takes, and is allowed to wrap.
+ */
+.search-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.search-snippet {
+  display: block;
+  color: var(--text);
+  font-size: 0.85rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.search-bar .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.empty .btn {
+  margin-top: 0.5rem;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}

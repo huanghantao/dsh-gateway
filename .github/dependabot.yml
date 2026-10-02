@@ -1,0 +1,33 @@
+version: 2
+
+# Nothing here has ever told this project about a CVE, and two of the four Go
+# modules are on the request path: websocket carries every event and YAML parses
+# the config at startup. The installers pin frp and Caddy by hand and verify
+# their checksums, which is good practice but is not a notification.
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      # The repository has a commit style; see CONTRIBUTING.md. Dependabot cannot
+      # write a "what changed, because why it matters" subject, so it gets the
+      # closest thing: a plain description with no Conventional Commits prefix.
+      prefix: ""
+
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ""
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ""

@@ -1,0 +1,19 @@
+{
+  "name": "dsh-gateway-web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Mobile-first PWA frontend for dsh-gateway. No bundler, no runtime dependencies.",
+  "type": "module",
+  "scripts": {
+    "prebuild": "node scripts/copy-public.mjs",
+    "build": "tsc",
+    "watch": "tsc --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit",
+    "assets": "node scripts/copy-public.mjs",
+    "serve": "node scripts/dev-server.mjs"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

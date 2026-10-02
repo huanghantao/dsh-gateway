@@ -1,0 +1,22 @@
+# Normalise line endings on checkout and commit.
+#
+# The Go sources, the TypeScript sources and both bash installers are written for
+# LF, and the installers are the reason this file exists: a CRLF `install.sh`
+# copied from a Windows editor fails in ways that look like a broken script
+# rather than a broken checkout ("bad interpreter", or a `case` branch that never
+# matches because the pattern carries a trailing \r).
+* text=auto eol=lf
+
+# Binary assets that must never be line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zst binary
+
+# Generated bundles and the lockfile are noise in a diff and in linguist stats.
+web/package-lock.json linguist-generated=true
+web/dist/** linguist-generated=true

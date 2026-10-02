@@ -1,0 +1,248 @@
+# dsh-gateway configuration.
+#
+# Written once by deploy/mac/install.sh to ~/.dsh-gateway/config.yaml (mode 0600)
+# and never overwritten afterwards — re-running the installer leaves this file
+# alone, so edits here are safe. Keys and defaults mirror internal/config in the
+# gateway exactly; anything omitted keeps its built-in default.
+#
+# Placeholder values are substituted by deploy/mac/install.sh, which refuses to
+# install a file with an unresolved placeholder left in it. Nothing below should
+# look like a placeholder token.
+
+# Where the gateway listens. Must be a loopback address: the gateway refuses to
+# start otherwise, because binding it publicly would put an agent that runs
+# arbitrary commands on the internet with no TLS of its own. frpc reaches this
+# port from the same machine.
+listen: "127.0.0.1:8787"
+
+# The externally reachable base URL, i.e. the Caddy site on the VPS. It is used
+# to build the pairing link, to decide whether the session cookie may carry the
+# Secure attribute (it does, because this is https), and to check the Origin
+# header on mutating requests.
+publicURL: "__PUBLIC_URL__"
+
+# Device records, the audit log, and the pairing secret live here. The pairing
+# secret is what `dsh-gateway pair` reads to print the same one-time code.
+stateDir: "~/.dsh-gateway"
+
+log:
+  # text is easier to read in ~/Library/Logs/dsh-gateway/gateway.log; switch to
+  # json if you pipe these logs somewhere.
+  level: "info"
+  format: "text"
+  addSource: false
+
+dsh:
+  # Looked up on PATH, which is why the launchd job sets PATH explicitly (see
+  # dev.dsh-gateway.gateway.plist) — launchd's default PATH would not find a
+  # node/nvm-installed `dsh`. Put an absolute path here instead if you prefer.
+  binary: "dsh"
+  # Must match the desktop DSH home, or the phone and the desktop will not see
+  # the same sessions.
+  home: "~/.dsh"
+  profile: "acp"
+  # Handed to the child as DSH_PERMISSION_MODE. Despite that variable's name DSH
+  # reads it as the *sandbox mode* and derives the approval policy from it:
+  # "danger-full-access" becomes "never" (no prompts at all, so the whole
+  # approval surface looks like it works while asking nothing) and every other
+  # value becomes "ask". workspace-write is the harness's own default and the
+  # only setting under which approvals are both meaningful and sufficient; the
+  # gateway warns at startup if you change it. Do not.
+  sandboxMode: "workspace-write"
+  startTimeout: "90s"
+  stopTimeout: "15s"
+  restartBackoff: "1s"
+  maxRestartBackoff: "60s"
+  # Extra KEY=VALUE pairs handed to the `dsh` child, e.g.:
+  # extraEnv:
+  #   - "DSH_LOG_LEVEL=debug"
+  extraEnv: []
+
+auth:
+  cookieName: "dsh_gw_session"
+  # How long a paired phone stays signed in without re-pairing. 30 days is the
+  # convenience/risk trade the mobile client was designed around; lower it if
+  # the phone is shared.
+  sessionTTL: "720h"
+  # A one-time pairing code is valid for this window (and the window before it,
+  # for clock skew). Validation caps this at 1h.
+  pairingTTL: "10m"
+  # Only loopback peers may set X-Forwarded-For / X-Forwarded-Proto. Both Caddy
+  # (in front of frps) and frpc itself appear as 127.0.0.1, and nothing else can
+  # reach this port, so a spoofed client IP is impossible — which matters
+  # because the rate limiter and lockout are keyed by client address.
+  trustedProxies:
+    - "127.0.0.1/32"
+    - "::1/128"
+  # Lockout after this many failed pairing attempts; each further failure
+  # doubles the wait, capped by maxLockout.
+  maxFailures: 5
+  lockoutBase: "30s"
+  maxLockout: "1h"
+  # Per-client token bucket for all traffic.
+  requestsPerSecond: 8
+  burst: 24
+
+session:
+  # Release a leased session once nothing is watching it. This is what lets the
+  # desktop open a session again, because DSH permits only one live writer per
+  # session (it enforces this with a kernel file lock).
+  idleTimeout: "5m"
+  # Upper bound on a single turn.
+  promptTimeout: "30m"
+  # How long an approval waits for a human before it is rejected. It is
+  # rejected, never allowed — an unanswered request must fail closed.
+  approvalTimeout: "5m"
+  # What a NEW session starts with when the app does not choose — the row the
+  # new-session sheet preselects. Both values are ACP option ids, which are
+  # opaque and defined by the harness, so read them off the app's own picker
+  # (or GET /models) rather than composing them: the model one happens to look
+  # like ["provider","model"], and a model id is not a name. Single quotes keep
+  # YAML from reading the brackets as a list.
+  #
+  # A stale id is not a startup error: the gateway logs a warning and the
+  # session keeps whatever the harness had. Blank either key to leave the
+  # choice entirely to the harness — which is the only honest default, because
+  # the right value names a provider route that exists on *your* machine.
+  #
+  # To pin one, read it off the app's own picker (or `GET /models`) after the
+  # first session and paste it back here, e.g.:
+  #
+  #   defaultModel: '["your-provider","your-model"]'
+  #   defaultReasoningEffort: "max"
+  defaultModel: ""
+  defaultReasoningEffort: ""
+  # Per-subscriber queue depth before the slowest client starts losing the
+  # oldest events (it then gets a `resync` and refetches; the agent is never
+  # blocked by a slow phone).
+  eventBuffer: 256
+  # Recent events retained for replay after a reconnect. Must be >= eventBuffer.
+  replayBuffer: 1024
+
+limits:
+  # 1 MiB. Prompts are text; this is not an upload endpoint.
+  maxBodyBytes: 1048576
+  readHeaderTimeout: "10s"
+  readTimeout: "60s"
+  # 0 = no write deadline. Streaming responses and WebSockets manage their own
+  # deadlines, and a global write timeout would cut long turns short.
+  writeTimeout: "0s"
+  idleTimeout: "120s"
+  shutdownTimeout: "20s"
+  maxPromptBytes: 262144
+  maxConcurrentTurns: 4
+
+# The stock DSH browser GUI, proxied through the gateway, is OFF. When it is
+# enabled it hands out an agent with arbitrary command execution behind a single
+# cookie that DSH itself does not authenticate, which is a much larger attack
+# surface than the mobile API. Leave it off; use the mobile client or the
+# desktop directly.
+desktopUI:
+  enabled: false
+  upstream: "http://127.0.0.1:3080"
+
+# The persisted DSH session log, projected read-only so the phone can show
+# history for a session it has not attached to. If DSH bumps its on-disk log
+# format beyond what this build understands, the endpoint reports
+# "unsupported" and the client shows "history unavailable" instead of failing.
+transcript:
+  enabled: true
+  # Empty means <dsh.home>/sessions.
+  sessionsDir: ""
+  # How many items one page of history holds. Items carry whole tool outputs and
+  # reasoning blocks, so a bigger page is a bigger response, not just more rows.
+  pageSize: 50
+  # Also stream what other DSH processes append to those logs, so a session you
+  # are running on the desktop (or with `dsh headless`) is live on the phone
+  # instead of appearing only when the reader refreshes. Sessions this gateway
+  # drives are excluded — their activity already arrives over ACP.
+  follow: true
+  # How often the logs are re-read. A session being written appends a handful of
+  # events per second, so a second is well inside the noise.
+  followInterval: "1s"
+
+# Web Push notifications. Two things earn an interruption: an approval that
+# expires if nobody answers, and a turn that ran long enough that nobody is
+# watching it any more. Subscriptions belong to paired devices, so revoking a
+# device stops its notifications in the same request.
+push:
+  enabled: true
+  # A contact the push service can reach the operator at.
+  #
+  # RFC 8292 requires this claim and allows a mailto: or https: URI and nothing
+  # else. A bare address ("you@example.com") reads like a contact to a human and
+  # like a malformed claim to Apple, which answers 403 without saying which field
+  # it disliked — so the shape is checked at startup rather than at first send,
+  # when an approval has already been missed.
+  #
+  # The shipped value is a placeholder that reaches nobody. It is accepted,
+  # because some services do not enforce it and a rejected request is worse than
+  # a working one, but the gateway warns at every start until you replace it.
+  subject: "mailto:dsh-gateway@localhost"
+  # How long a turn must run before its end is worth a buzz. Shorter means more
+  # notifications, and a phone that buzzes for every quick answer gets muted.
+  turnThreshold: "2m"
+  # Chat channels that receive the same notifications. This is the delivery path
+  # that works on a phone which cannot reach Google's push service (no Google
+  # Play services, or a network that cannot route to it) — which on many phones
+  # is all of them. The url is a capability: anyone holding it can post to that
+  # chat, so it stays in this file.
+  #
+  # Off by default, and deliberately so: a webhook posts the notification in
+  # clear to whichever service it names, and the notification body carries the
+  # session's title (or, for a session that has none, the first line of the
+  # prompt that opened it). Enabling this is a decision to send that text to a
+  # third party, so it is not a decision to make on the operator's behalf.
+  #
+  # To turn it on, uncomment and replace the url with your own bot's incoming
+  # webhook. Only "feishu" is implemented today.
+  webhooks: []
+
+  # Whether a notification may name the session it is about.
+  #
+  # Off by default. A notification body is the least private place this data
+  # could go: it is rendered on a lock screen, kept by the operating system's
+  # notification store, and sent verbatim to any webhook above. Turning this on
+  # puts the session's title there — or, for a session that has no title, the
+  # first line of the prompt that opened it, which is text you typed.
+  includeSessionName: false
+
+# What the "tidy up" suggestion screen treats as a test run rather than work.
+#
+# Both keys are empty by default, which means the portable rules: the sentences
+# any script says to an agent, and the scratch directories this machine actually
+# reports. A harness whose test runs leave their own markers adds them here, so
+# that the source does not have to guess at one person's naming.
+# curation:
+#   testTitlePatterns:
+#     - "wafl-probe"
+#   tempRoots:
+#     - "/var/tmp"
+
+# Unit prices for the "what did this cost" estimate in a session receipt. Empty
+# by default: without a table the receipt still shows tokens, tools, files and
+# durations — it just refuses to invent money, which is the right answer when
+# the prices depend on your account's contract and discount.
+#
+# To fill it in, take the numbers for the models you actually run and list one
+# entry per model, e.g.:
+#
+#   receipt:
+#     pricing:
+#       - model: "deepseek/deepseek-v4.1-flash"
+#         currency: CNY
+#         inputPerMillion: 0
+#         outputPerMillion: 0
+#         cacheReadPerMillion: 0
+#
+# Prices are per million tokens, and the three counts a session records are
+# disjoint: fresh prompt tokens, cache-read prompt tokens, and output.
+receipt:
+  pricing: []
+
+# Workspace roots the phone may open. The client must pick one of these; it can
+# never supply an arbitrary path. Required: the installer refuses to run without
+# --workspaces, and refuses your home directory itself, because this list is the
+# only thing between a paired phone and every file you own.
+workspaces:
+__WORKSPACES__

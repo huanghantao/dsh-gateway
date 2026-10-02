@@ -1,0 +1,167 @@
+# Caddyfile — TLS ingress for the dsh-gateway tunnel.
+#
+# Rendered by deploy/vps/install.sh into /etc/caddy/Caddyfile (mode 0644: it
+# holds no secrets). Placeholder values are substituted by that script, and the
+# installer refuses to install a file with an unresolved token left in it —
+# every placeholder below, the ones in comments included, is substituted.
+#
+# Shape of the path a phone request takes:
+#
+#   phone ──HTTPS──> Caddy ──HTTP, loopback──> frps 127.0.0.1:18787
+#                       │                            ║ frp tunnel (TLS,
+#                       │                            ║ encrypted, token)
+#                       └── this file                ▼
+#                                                frpc on the Mac
+#                                                   └── 127.0.0.1:8787
+#
+# Caddy is the only component with a public port. The gateway itself speaks
+# plain HTTP and is never reachable off the Mac.
+#
+# Two ports are in play, both chosen by the installer:
+#
+#   __HTTPS_PORT__   the application, TLS-terminated.
+#   __HTTP_PORT__    plain HTTP. In the default `--tls internal` mode it serves
+#                   exactly one thing — the CA certificate a phone installs —
+#                   and redirects everything else to HTTPS. Under
+#                   `--tls acme` it is where ACME's http-01 challenge lands.
+#
+# ---------------------------------------------------------------------------
+# Why these are not 80/443, and where the certificate comes from.
+#
+# Some hosting providers — mainland Chinese clouds most notably — block inbound
+# 80 and 443 until the domain has an ICP filing, and block the usual alternative
+# HTTP ports (2053, 2083, 2087, 2096, 8880, 9443) along with them. High ports
+# are usually left alone, which is why 8080 and 8443 are the shipped default —
+# but that is a guess about your provider, not a property of this software. If
+# your host carries 80 and 443, use --tls acme --https-port 443 --http-port 80
+# and none of the below applies to you.
+#
+# A publicly trusted certificate is then out of reach, because every ACME
+# challenge that does not need a DNS provider API needs one of those two ports:
+#
+#   http-01       port 80
+#   tls-alpn-01   port 443
+#   dns-01        a DNS provider API, which sslip.io does not offer
+#
+# So the default `--tls internal` has Caddy sign with a CA it generates on this
+# host, and publishes that root on the plain-HTTP port for the phone to install
+# once. Everything else — the PWA, its service worker, Secure cookies, the
+# WebSocket — then behaves exactly as it would under a publicly trusted
+# certificate.
+#
+# `--tls acme` renders the other variant instead: no internal CA and no CA site,
+# a publicly trusted certificate obtained over ACME, which requires the
+# challenge ports to be reachable (normally --https-port 443 --http-port 80).
+# The installer warns if acme is selected with any other pair.
+# ---------------------------------------------------------------------------
+
+# Global options. Automatic HTTPS is already on (each site address is a
+# hostname), so this block is optional — uncomment a line if you want it. Under
+# `--tls acme`, while testing issuance, use the staging CA to avoid burning the
+# production rate limit (5 failed validations per account, per hostname, per
+# hour); remember to switch back afterwards, or the phone will not trust the
+# certificate:
+# {
+#	email you@example.com
+#	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+# }
+
+# The application. __DOMAIN__ is the sslip.io name that resolves to this VPS's
+# IP.
+__DOMAIN__:__HTTPS_PORT__ {
+__TLS_DIRECTIVE__
+
+	# ---------------------------------------------------------------------
+	# HSTS. Only sent on HTTPS. One year, and includeSubDomains is safe here
+	# because this name is a single host under a shared wildcard zone that we
+	# do not otherwise use — if you later serve other sslip.io names from
+	# this host, narrow or drop this header rather than poisoning them.
+	#
+	# `preload` is deliberately absent: submitting to the browser preload
+	# lists is effectively irreversible and would be a poor fit for a
+	# deployment whose domain is generated from an IP address.
+	#
+	# Note what HSTS means for the CA site on the plain-HTTP port: browsers
+	# apply an HSTS policy to the host, ignoring the port, so a browser that
+	# has once loaded this app over HTTPS will upgrade a later
+	# http://__DOMAIN__:__HTTP_PORT__/ca.crt to https on that port, where
+	# Caddy speaks plain HTTP. Install or re-fetch the CA before the first
+	# HTTPS visit, from a browser that has not seen this header, or after
+	# clearing the host's HSTS state.
+	# ---------------------------------------------------------------------
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	# WebSockets need nothing special: Caddy detects the Upgrade header and
+	# proxies the connection (that is how GET /api/v1/events works). It does
+	# not apply default proxy read/write timeouts either, which is what lets a
+	# long agent turn stay open. If you ever add timeouts, keep them above the
+	# gateway's session.idleTimeout (5m by default) or idle streams get cut.
+__CA_ROUTE__
+	# The application itself. Two `handle` blocks at the same level are mutually
+	# exclusive: the first matching one runs, so /ca.crt above never reaches the
+	# proxy, and everything else never touches the certificate file.
+	handle {
+		reverse_proxy 127.0.0.1:18787 {
+			# Disable response buffering so tokens reach the phone as the
+			# agent emits them instead of arriving in one lump at the end of a
+			# turn.
+			flush_interval -1
+		}
+	}
+
+	# No `encode` directive on purpose: the payloads are small JSON frames and
+	# already-compressed assets, and transparent compression in front of a
+	# streaming/WebSocket endpoint is a well-known way to introduce buffering
+	# bugs for no real gain.
+
+	# ---------------------------------------------------------------------
+	# Optional: restrict by client IP.
+	#
+	# Replace the fallback handle below with the guarded pair here. A /ca.crt
+	# handle above, where one is present (the default `--tls internal` mode),
+	# stays outside the allowlist on purpose: a phone needs the root before it
+	# can use anything else, and a root certificate is public information.
+	#
+	# Be aware of what an allowlist buys: mobile carriers rotate addresses
+	# constantly and put many subscribers behind CGNAT, so it both locks you
+	# out mid-session and rarely excludes a determined attacker. It is defence
+	# in depth, not a substitute for pairing and revoking devices.
+	#
+	#	@phone remote_ip 203.0.113.0/24 198.51.100.7
+	#	handle @phone {
+	#		reverse_proxy 127.0.0.1:18787 {
+	#			flush_interval -1
+	#		}
+	#	}
+	#	handle {
+	#		respond "not found" 404
+	#	}
+	# ---------------------------------------------------------------------
+}
+
+# Plain HTTP. Anything arriving here — the bare IP, a stale bookmark, a probe —
+# is sent to the canonical HTTPS name rather than served in the clear, so no
+# request is answered without TLS. (The one exception, in the default mode, is
+# the CA certificate a phone has to install before it can trust anything; a root
+# certificate is public information.) Caddy answers ACME HTTP-01 challenges
+# internally before it reaches these routes, so this catch-all does not interfere
+# with issuance for __DOMAIN__.
+#
+# This port is the *fallback* way to fetch the root, not the primary one. It is
+# plain HTTP, so a provider that filters unfiled hostnames can answer it with an
+# ICP block page instead — keyed on the Host header being a domain and not on the
+# IP, so it is not something this file can work around. The copy served over
+# HTTPS by the site above is what the documentation tells a phone to use.
+:__HTTP_PORT__ {
+__CA_HANDLE__
+
+	# Everything else goes to HTTPS. There is no redirect to preserve on the
+	# port ACME would have used, so this is a plain convenience.
+	handle {
+		redir https://__DOMAIN__:__HTTPS_PORT__{uri} permanent
+	}
+}

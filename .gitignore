@@ -1,0 +1,13 @@
+# Build output
+/bin/
+/coverage.out
+/.dev-state/
+.DS_Store
+
+# The frontend bundle. Generated, never committed: the Go binary embeds it, so
+# every path that compiles the gateway builds it first (`make build`, CI, and
+# deploy/mac/install.sh). `make web` leaves a stamp inside dist so a rebuild is
+# skipped when web/src has not changed.
+/web/dist/
+/web/node_modules/
+*.tsbuildinfo

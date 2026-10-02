@@ -1,0 +1,67 @@
+# frps — the VPS end of the dsh-gateway tunnel.
+#
+# Rendered by deploy/vps/install.sh into /etc/frp/frps.toml (mode 0640,
+# root:frp — it holds the shared tunnel token and the frps service runs as the
+# frp group). Placeholder values are substituted by that script; do not add new
+# placeholder-looking tokens to this file, because the installer refuses to
+# install a template it could not fully resolve.
+#
+# Checked against frp v0.71.0 with `frps verify -c <file>` plus a live frpc↔frps
+# handshake. frp parses TOML in strict mode: an unknown key is a startup error,
+# not a warning, so re-run `frps verify -c /etc/frp/frps.toml` after any edit.
+
+# The control listener, where frpc dials in from the Mac. 7000 is frp's default.
+# This is the one port beyond 22/80/443 that the firewall must leave open.
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+# ---------------------------------------------------------------------------
+# The important line.
+#
+# Left unset, frps binds each proxy's remote port on the same address as
+# bindAddr (0.0.0.0) — which would publish the gateway's port 18787 straight to
+# the internet, bypassing Caddy, its certificate, and its HSTS header. Pinning
+# proxy binds to loopback means the only route to 18787 is through Caddy on
+# this host.
+#
+# Verified present in frp v0.71.0 (pkg/config/v1/server.go,
+# ServerCommonConfig.ProxyBindAddr "specifies the address that the proxy binds
+# to"). If a future frp drops the key, `frps verify` fails loudly on startup;
+# the fallback is to delete this line and add an explicit firewall deny
+# instead: `ufw deny 18787/tcp`.
+# ---------------------------------------------------------------------------
+proxyBindAddr = "127.0.0.1"
+
+# Shared secret for the tunnel: 256 bits of hex, generated once with
+# `openssl rand -hex 32` and never regenerated (rotating it breaks the tunnel
+# until the Mac is updated too). It is written here explicitly rather than read
+# from FRP_TOKEN so the value lives in exactly one place.
+auth.method = "token"
+auth.token = "__TOKEN__"
+
+# Refuse plaintext logins outright. A token sent over an unencrypted connection
+# is a token an on-path observer can replay, and the client's TLS is not
+# enforced by default. frps auto-generates the self-signed certificate it
+# presents when no certFile/keyFile is configured (pkg/transport/tls.go,
+# NewServerTLSConfig), so this needs no extra files.
+transport.tls.force = true
+
+# Only allow the one remote port this deployment uses. A leaked token then
+# cannot be used to bind, say, 0.0.0.0:8443 and impersonate something else on
+# the VPS, or to hold a port hostage. frpc asks for 18787 and nothing else.
+allowPorts = [
+  { single = 18787 },
+]
+
+# Console logging → journald (`journalctl -u frps`). frp's file logger would
+# bypass the journal and would need its own rotation policy.
+log.to = "console"
+log.level = "info"
+
+# The frps dashboard is deliberately not enabled: it is a second HTTP surface
+# with a second credential, and nothing in this deployment needs it. If you do
+# want it later, bind it to loopback and give it a real password:
+#   webServer.addr = "127.0.0.1"
+#   webServer.port = 7500
+#   webServer.user = "operator"
+#   webServer.password = "<long random value>"

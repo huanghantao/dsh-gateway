@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/huanghantao/dsh-gateway/security/advisories/new
+    about: Report privately. Never open a public issue describing an exploit — this gateway is a shell on the internet.
+  - name: Deployment and troubleshooting questions
+    url: https://github.com/huanghantao/dsh-gateway/blob/main/docs/deployment.md#8-troubleshooting
+    about: Most "it will not connect" reports are answered here, and `dsh-gateway doctor` names the first thing that is wrong.
+  - name: Design decisions and why things are the way they are
+    url: https://github.com/huanghantao/dsh-gateway/tree/main/docs/adr
+    about: The ADRs record the reasoning behind the ACP seam, the read-only transcript, and session leases.

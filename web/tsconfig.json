@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    /* The browser loads these files directly as native ES modules, so the
+       emitted JavaScript must keep the exact specifier text we wrote. That is
+       why every relative import carries an explicit `.js` extension: `tsc` is a
+       transpiler here, not a module resolver, and never rewrites specifiers. */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+
+    "rootDir": "src",
+    "outDir": "dist",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "forceConsistentCasingInFileNames": true,
+
+    /* No bundler means no downlevel helpers are injected for us; keep the
+       output 1:1 with the source. */
+    "importHelpers": false,
+    "sourceMap": true,
+    "removeComments": false,
+    "newLine": "lf"
+  },
+  "include": ["src/**/*.ts"]
+}

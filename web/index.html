@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- `viewport-fit=cover` is what makes env(safe-area-inset-*) non-zero on a
+         notched phone; without it the composer can sit under the home bar. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="Drive DeepSeek Harness from your phone." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="dsh-gateway" />
+
+    <title>dsh-gateway</title>
+
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
+
+    <!-- The Go server substitutes the nonce placeholder below, once per
+         response. The stylesheet is same-origin so `style-src 'self'` would
+         already allow it, but the nonce keeps the rule uniform for every style
+         and script element. The placeholder appears only in the attributes
+         marked with it, never in prose. -->
+    <link rel="stylesheet" href="./styles.css" nonce="{{NONCE}}" />
+
+    <!-- Critical first-paint rules are inline so the shell does not flash an
+         unstyled list before styles.css lands. This inline block is the reason
+         the server's CSP carries a nonce at all. -->
+    <style nonce="{{NONCE}}">
+      :root {
+        color-scheme: dark light;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0f14;
+      }
+      @media (prefers-color-scheme: light) {
+        html,
+        body {
+          background: #f6f7f9;
+        }
+      }
+      #app {
+        min-height: 100dvh;
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#view-root">Skip to content</a>
+
+    <!-- The shell is built by app.js. Only the mount points live here, so there
+         is no inline event handler anywhere in the document. -->
+    <div id="app" class="app"></div>
+    <div id="sheet-host"></div>
+
+    <!-- One polite live region for transient confirmations ("Session released").
+         It exists from first paint so the announcement is not swallowed by a
+         region that appears at the same moment as its text. -->
+    <div id="notice-host" class="notice-host" role="status" aria-live="polite" aria-atomic="true"></div>
+    <!-- Undo lives here rather than in the notice host: a notice is a sentence
+         the app replaces, and this is a control the operator has to be able to
+         press while it lasts. -->
+    <div id="toast-host" class="toast-host"></div>
+
+    <noscript>
+      <p class="noscript">dsh-gateway needs JavaScript to talk to the agent.</p>
+    </noscript>
+
+    <script type="module" src="./app.js" nonce="{{NONCE}}"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="dsh-gateway">
+  <!--
+    The maskable variant: full-bleed (the platform applies its own shape) and
+    the glyph inside the safe zone, which is the central 80% circle. Anything
+    outside that circle can be cropped by a round or squircle mask.
+  -->
+  <rect width="512" height="512" fill="#0b0f14" />
+  <g fill="none" stroke="#4f8cff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M196 202 L256 256 L196 310" />
+    <path d="M276 310 H326" />
+  </g>
+</svg>

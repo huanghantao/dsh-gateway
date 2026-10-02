@@ -1,0 +1,137 @@
+name: Bug report
+description: Something the gateway does, or fails to do, that it should not.
+title: ""
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If this is a security problem, stop and read [SECURITY.md](https://github.com/huanghantao/dsh-gateway/blob/main/SECURITY.md).**
+        Do not describe an exploit or a bypass here — use GitHub's private
+        vulnerability reporting instead.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I ran `dsh-gateway doctor` and read what it said.
+          required: true
+        - label: I read [docs/deployment.md §8](https://github.com/huanghantao/dsh-gateway/blob/main/docs/deployment.md#8-troubleshooting), which answers a lot of this.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The actual behaviour, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: |
+        The smallest sequence that shows it. "Open the app and send a prompt" is
+        not reproducible; "pair a device, open a session the desktop is holding,
+        then release the lease" is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`dsh-gateway doctor` output"
+      description: |
+        Paste the whole thing. It names the first thing that is wrong and is
+        usually the fastest path to an answer. **Check it for your hostname and
+        client IP before pasting** — redact them if you would rather not publish
+        them.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: gateway-version
+    attributes:
+      label: Gateway version
+      description: "`dsh-gateway version`"
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DeepSeek Harness version
+      description: |
+        "`dsh --version`". This matters more than usual: the ACP wire shapes and
+        the on-disk session-log format are both pinned to what DSH actually does,
+        and a mismatch is a common cause.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Desktop OS and version
+      description: The Mac running the gateway, e.g. "macOS 15.3, Apple Silicon".
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tls-mode
+    attributes:
+      label: TLS mode
+      options:
+        - "internal (Caddy's own CA, installed on the phone)"
+        - "acme (publicly trusted certificate)"
+        - "not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: desktop-ui
+    attributes:
+      label: Is `desktopUI.enabled` on?
+      description: The reverse proxy for the full DSH GUI. It is the largest attack surface and changes how several things behave.
+      options:
+        - "no (the default)"
+        - "yes"
+        - "not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surfaces
+    attributes:
+      label: Which surfaces are involved?
+      multiple: true
+      options:
+        - Pairing
+        - The sessions list
+        - A session transcript
+        - Sending a prompt
+        - Approvals
+        - Notifications / push
+        - Search
+        - Trash / delete / restore
+        - The desktop GUI proxy
+        - The installer
+        - "`doctor` / `pair` / `version`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        From `~/Library/Logs/dsh-gateway/gateway.log` (or wherever you sent
+        stderr). **Redact your hostname, client IPs and anything you would not
+        post publicly** — the log is verbose and may contain session titles.
+      render: text
+    validations:
+      required: false

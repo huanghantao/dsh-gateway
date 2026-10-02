@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="dsh-gateway">
+  <!--
+    No remote assets and no web fonts by policy, so the mark is pure geometry: a
+    terminal chevron and a caret, which is what the app drives. Drawn on a 512
+    grid because that is the largest size any platform asks for and SVG scales
+    down losslessly.
+  -->
+  <rect width="512" height="512" rx="116" fill="#0b0f14" />
+  <g fill="none" stroke="#4f8cff" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M170 172 L250 256 L170 340" />
+    <path d="M282 340 H346" />
+  </g>
+</svg>

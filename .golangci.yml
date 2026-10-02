@@ -1,0 +1,94 @@
+# golangci-lint configuration for dsh-gateway.
+#
+# The enabled set is broader than the default. This codebase sits between the
+# public internet and an agent that can run arbitrary commands, so the linters
+# that catch resource leaks, swallowed errors, and context misuse earn their
+# noise.
+#
+# Verified with golangci-lint v2.14.0 against this tree; `make lint` fails on any
+# finding, and CI runs it. The version is pinned there rather than left as
+# `latest`, because several of the checks below (gosec's G115, staticcheck's QF
+# set) arrived within the v2 line and a silent bump would turn the tree red with
+# no change on this side.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck       # an unchecked error on a security path is a bug
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose      # leaked response bodies exhaust connections
+    - contextcheck   # context must flow, not be invented mid-call
+    - errorlint      # errors.Is/As rather than ==, so wrapping keeps working
+    - exhaustive     # a new enum member must be handled somewhere
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr         # returning nil after a non-nil error is almost always wrong
+    - noctx          # every outbound request needs a context
+    - prealloc
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # hugeParam and rangeValCopy are micro-optimisations that trade
+        # readability for nanoseconds. This codebase passes small immutable DTOs
+        # (harness.Update, harness.Session, audit.Record) by value on purpose:
+        # it signals that the callee cannot mutate the caller's state, and it
+        # removes a nil case from every call site. The copies are negligible
+        # beside the JSON encoding each of them is about to undergo.
+        - hugeParam
+        - rangeValCopy
+    gosec:
+      excludes:
+        # math/rand is used only for restart-backoff jitter, never for anything
+        # security-relevant; a CSPRNG there would be slower and no safer.
+        - G404
+    exhaustive:
+      default-signifies-exhaustive: true
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: unused-parameter
+          disabled: true
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests may take shortcuts that production code must not.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+          - prealloc
+          - contextcheck
+      # The embedded frontend is build output, not Go source.
+      - path: web/dist
+        linters:
+          - revive
+          - unused
+
+formatters:
+  enable:
+    - gofmt
