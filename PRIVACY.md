@@ -143,9 +143,34 @@ unlink. Two consequences worth knowing:
 
 ## What the phone stores
 
-Nothing persistent. There is no `localStorage`, `sessionStorage` or IndexedDB
-anywhere in the web app, and the service worker caches only the static app shell —
-it never intercepts `/api/`, so no conversation is written to the browser cache.
+No transcript is cached. The service worker caches only the static app shell and
+never intercepts `/api/`, so nothing the gateway serves is written to the browser
+cache; history is read on demand, and the tab holds what it is showing in memory.
+
+What does persist is the notification list, in `localStorage`, so that the
+activity screen survives a reload:
+
+- `dsh.activity.v1` — at most **200 rows**, none older than **30 days**. A row
+  carries the session's *id* (never its name: that is resolved when the row is
+  drawn), when it happened, which kind of event it was, who it was about, how it
+  ended, a count such as "12 tool calls · 3 files changed", and the one sentence
+  the notification showed.
+- `dsh.activity.read.v1` — a single timestamp: how far you have acknowledged,
+  which is all the unread badge is computed from.
+
+Both are device-local and nothing in them is sent back to the gateway. **Two of
+those fields can hold text the model wrote**, which is worth saying plainly
+rather than calling the list "metadata": a delegated task's row carries the
+child's own closing message (up to 400 characters of arbitrary model output), and
+a failed turn's row carries the harness's failure detail. A row also names a
+delegated task by the description the model wrote for it when
+`push.includeTaskNames` is on — the same text that reaches the lock screen, and
+`false` keeps it out of both. No prompt you typed and no tool argument is stored.
+
+Clearing site data removes both keys, and nothing else depends on them. Where
+storage is unavailable — Safari in a private window, or a browser with storage
+disabled — the list still works for as long as the tab lives and is simply not
+kept.
 
 The session credential is an HttpOnly cookie. The pairing response's bearer token
 is discarded rather than stored. The one residue is that the pairing code sits in
