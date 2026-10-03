@@ -234,9 +234,9 @@ type promptParams struct {
 	Prompt    []promptContent `json:"prompt"`
 }
 
-// promptContent is one prompt block. Only "text" is emitted today; the type
-// carries the image fields so that enabling images later is a validation change,
-// not a schema change.
+// promptContent is one prompt block. Text and image are both emitted; an image
+// block is refused in convertPrompt when the harness did not advertise support,
+// which is why the type carries both sets of fields rather than two shapes.
 type promptContent struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`

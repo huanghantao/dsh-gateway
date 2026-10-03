@@ -520,7 +520,7 @@ export const api = {
   /**
    * Undoes recorded changes.
    *
-   * `403 revert_disabled` when the deployment has not opted in — the app hides
+   * `503 revert_disabled` when the deployment has not opted in — the app hides
    * the control in that case, so reaching this is a bug rather than a case.
    */
   async revert(id: string, paths: readonly string[], signal?: AbortSignal): Promise<RevertReport> {

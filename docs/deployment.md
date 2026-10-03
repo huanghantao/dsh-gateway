@@ -548,7 +548,8 @@ jq -c 'select(.event=="approval.decided")' ~/.dsh-gateway/audit.jsonl   # who au
 
 Recorded events: `device.paired`, `device.pair_failed`, `device.revoked`,
 `auth.failed`, `session.opened`, `session.released`, `prompt.sent`,
-`prompt.cancelled`, `approval.decided`, `harness.restarted`, `harness.failed`.
+`prompt.cancelled`, `approval.decided`, `approval.grant_revoked`,
+`workspace.reverted`, `harness.restarted`, `harness.failed`.
 Each line carries `time`, `event`, `requestId`, `deviceId`, `clientIp` and
 event-specific `fields`.
 
@@ -1053,7 +1054,7 @@ that refusal is the `unsupported` flag.
 ```sh
 dsh --version                                     # what DSH is now
 dsh-gateway version                               # what the gateway was built from
-head -c 200 "$HOME/.dsh/sessions/"*/"$SESSION_ID"*.jsonl 2>/dev/null | jq -c '{version}'
+zstd -dc "$HOME/.dsh/sessions/"*/"$SESSION_ID"/session.v4.jsonl.zstd 2>/dev/null | head -1 | jq -c '{version}'
 tail -20 ~/Library/Logs/dsh-gateway/gateway.log | grep -i transcript
 ```
 

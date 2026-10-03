@@ -135,7 +135,7 @@ func TestTLSVersionName(t *testing.T) {
 	}
 }
 
-// TestDoctorDoesNotPanicOnAMissingConfig keeps the diagnostic from becoming the
+// TestDoctorReportsAnUnloadableConfig keeps the diagnostic from becoming the
 // thing that needs diagnosing. A config that fails to load is itself the
 // finding, and must be reported rather than crashing.
 func TestDoctorReportsAnUnloadableConfig(t *testing.T) {

@@ -45,8 +45,8 @@ CI runs a superset, and it is worth knowing which parts are not in `make check`:
 
 | Job | What it does | In `make check`? |
 |---|---|---|
-| test | `go test -race ./...` on Ubuntu **and** macOS | no `-race`, one platform |
-| lint | `gofmt -l` (fails, does not fix), `tsc --noEmit`, golangci-lint | gofmt fixes instead; no lint |
+| test | `go vet`, `gofmt -l` (fails, does not fix), `go test -race ./...` on Ubuntu **and** macOS | vet yes; gofmt fixes instead of failing; no `-race`, one platform |
+| lint | `tsc --noEmit`, a `node --check` on the e2e script, golangci-lint | tsc yes; no lint |
 | build | `make build` and uploads the binary | no |
 | shellcheck | `shellcheck --severity=warning` on both installers, plus an argument-parser test | no |
 
@@ -61,7 +61,7 @@ Both installers are shellchecked. If you touch `deploy/*/install.sh`, run
 
 ## Tests
 
-Three tiers, and the reason each exists is in the [README](README.md#development):
+Four tiers, and the reason each exists is in the [README](README.md#development):
 
 - **Unit** — no external dependencies, run everywhere.
 - **Integration** — drive a real `dsh --profile acp` child. Skipped automatically
@@ -109,7 +109,7 @@ than a list of files.
 
 Anything touching authentication, the approval path, the workspace allowlist, the
 session-log parser or the proxy needs a careful look, and the reasoning belongs
-in the commit body. Two rules that are not negotiable in review:
+in the commit body. Three rules that are not negotiable in review:
 
 - **Approvals fail closed.** An unanswered approval is refused, never allowed,
   and no code path approves without a human decision. A scoped grant

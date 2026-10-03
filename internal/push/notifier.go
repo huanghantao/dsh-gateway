@@ -213,7 +213,7 @@ func (n *Notifier) handle(ctx context.Context, event events.Event) {
 	case events.TypeHarnessState:
 		n.handleHarness(ctx, event)
 	default:
-		// Nine frame types reach the bus and the rest are silent on purpose. See
+		// The frame types this switch does not name are silent on purpose. See
 		// the policy in the type comment above.
 	}
 }

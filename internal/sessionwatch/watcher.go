@@ -176,7 +176,7 @@ func (w *Watcher) Run(ctx context.Context) {
 // stillHeld reports whether a session the last sweep saw mid-turn is still held
 // by a live writer.
 //
-// It exists so the early-return above can read as "nothing has changed and
+// It exists so the early return in follow can read as "nothing has changed and
 // nothing is running", rather than as a chain of &&s with a negated compound at
 // the end. The distinction matters because the projection may have been evicted
 // since: the baseline is what says the turn was running, and the lock is what

@@ -191,12 +191,12 @@ func resolveConfig(flags runFlags) (config.Config, string, error) {
 	return cfg, configPath, nil
 }
 
-// serve is the composition root: every dependency is constructed here, in
-// dependency order, and passed down explicitly. Nothing reaches for a global, so
-// the whole wiring is readable in one place and a test can build any subset.
-// serve runs the gateway. configPath is passed in rather than re-derived so
-// that an error message can name the file the operator is actually editing —
-// the same reason resolveConfig returns it.
+// serve runs the gateway: the composition root, where every dependency is built
+// in dependency order and passed down explicitly. Nothing reaches for a global,
+// so the whole wiring is readable in one place and a test can build any subset.
+// configPath is passed in rather than re-derived so that an error message can
+// name the file the operator is actually editing — the same reason resolveConfig
+// returns it.
 func serve(ctx context.Context, cfg config.Config, configPath string, logger *logx.Logger) error {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
@@ -567,9 +567,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		Version:       version,
 		StartedAt:     time.Now(),
 		Lifecycle:     life,
-		// Readiness is the child's, whichever process is holding it: a client
-		// that cannot reach the host reports a state that is not ready, so this
-		// one expression covers both modes.
+		// Readiness is the child's, and the child lives in the agent host: a
+		// driver that cannot reach the host reports a state that is not ready,
+		// so this one expression is the whole rule.
 		Ready: func() bool { return harnessDriver.State() == harness.StateReady },
 		// ACP reveals the model catalog only when a session attaches, so it is
 		// remembered between runs: otherwise the picker in the app has nothing
@@ -772,8 +772,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 	}
 	approvalsBroker.Close()
 	leases.ReleaseAll(shutdownCtx, "shutdown") //nolint:contextcheck // see above
-	// The harness is closed by the deferred call that matches the mode this
-	// process started in; see the switch above.
+	// The harness connection is closed by the deferred closeHarness above.
+	// Keeping the child — and the turn it is running — alive across a redeploy
+	// is the agent host's business, not this process's.
 	return nil
 }
 

@@ -491,6 +491,8 @@ failure than a short history, on a personal machine).
 | `session.opened` / `session.released` | a session lease took or released DSH's single-writer lock |
 | `prompt.sent` / `prompt.cancelled` | work admitted or interrupted |
 | `approval.decided` | a human allowed or rejected a tool call |
+| `approval.grant_revoked` | a standing authorisation was withdrawn |
+| `workspace.reverted` | an undo wrote to the operator's files |
 | `harness.restarted` / `harness.failed` | the DSH child's lifecycle |
 
 Each line carries `time`, `event`, `requestId`, `deviceId`, `clientIp`, and
@@ -498,8 +500,9 @@ event-specific `fields`. `requestId` also appears in the access log, so an audit
 line can be correlated with a request without duplicating request detail.
 
 **What it does not contain.** No prompt text: `prompt.sent` records the device,
-the turn id and how many blocks were sent, and nothing else. No tool arguments:
-`approval.decided` records the tool's *name*, the byte length of its arguments and
+the turn id, the block count and whether the prompt was admitted as running or
+queued — and nothing else. No tool arguments: `approval.decided` records the
+tool's *name*, the byte length of its arguments and
 a SHA-256 of them, so a decision can be tied to the call it authorised and two
 identical approvals can be recognised as identical — but the arguments themselves
 (the body of a `Write`, the text of an `Edit`, the command line of a `Bash`) stay

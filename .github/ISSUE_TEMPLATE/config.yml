@@ -8,4 +8,4 @@ contact_links:
     about: Most "it will not connect" reports are answered here, and `dsh-gateway doctor` names the first thing that is wrong.
   - name: Design decisions and why things are the way they are
     url: https://github.com/huanghantao/dsh-gateway/tree/main/docs/adr
-    about: The ADRs record the reasoning behind the ACP seam, the read-only transcript, and session leases.
+    about: The ADRs record the reasoning behind the ACP seam, the session log projection, session leases, turns and approvals, project changes and undo, and the two-tier turn lifetime.

@@ -259,9 +259,9 @@ func TestARewrittenLogIsReadFromTheStart(t *testing.T) {
 	}
 }
 
-// TestMetaResumesToo keeps the session list's cost model honest: the list reads
-// every changed log's metadata, so a log being written must cost its append
-// there as well.
+// TestMetaResumesInsteadOfRereading keeps the session list's cost model honest:
+// the list reads every changed log's metadata, so a log being written must cost
+// its append there as well.
 func TestMetaResumesInsteadOfRereading(t *testing.T) {
 	root := t.TempDir()
 	writeLog(t, root, "--ws--", testSession, sampleEvents())

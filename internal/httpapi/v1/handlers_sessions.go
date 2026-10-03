@@ -45,8 +45,8 @@ type sessionView struct {
 	// MessageCount is how many conversation rows the session holds. It is the
 	// cheapest honest signal of whether there is any work in there.
 	MessageCount int `json:"messageCount,omitempty"`
-	// HistoryAvailable is false when no readable log exists, so the UI can hide
-	// the "load earlier" affordance instead of showing a spinner forever.
+	// HistoryAvailable is false when no readable log exists for the session. It
+	// is also what the transcript's LogReadable is set from.
 	HistoryAvailable bool `json:"historyAvailable"`
 	// Turn is the prompt running in this session right now, when this gateway is
 	// the one running it. It carries the start time, which is what a client that

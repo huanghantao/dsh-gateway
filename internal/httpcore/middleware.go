@@ -137,8 +137,9 @@ func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter 
 
 // AccessLog records one line per request.
 //
-// Only the path is logged, never the query string: the pairing link carries a
-// one-time code in its query and that must not reach the log.
+// Only the path is logged, never the query string: a session search carries the
+// operator's own words in `q`, and that is as private as the transcript it was
+// searched against.
 func AccessLog(logger *logx.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

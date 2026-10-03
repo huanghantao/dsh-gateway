@@ -21,6 +21,9 @@ import (
 type Bridge struct {
 	bus *events.Bus
 
+	// mu guards open.
+	mu sync.Mutex
+
 	// open remembers what a call was opened with, per call id.
 	//
 	// This is not a nicety. Verified against the live harness: the opening
@@ -31,7 +34,6 @@ type Bridge struct {
 	//
 	// Entries live only as long as the call does: a completion removes its own,
 	// so the map is bounded by how many calls are in flight at once.
-	mu   sync.Mutex
 	open map[string]opened
 
 	// limits is the deployment's byte budget for a tool's arguments and result.

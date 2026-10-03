@@ -200,15 +200,14 @@ func (s *Service) codeFor(window int64) string {
 	//
 	// limit is the largest multiple of the alphabet length that fits in a byte;
 	// bytes at or above it are discarded so every symbol is equally likely.
-	// Deriving it is the point: the previous hardcoded 248 assumed an alphabet
-	// of 31, but this one has 30 symbols, so eight of them were measurably more
-	// likely than the rest — a real entropy loss that a chi-square test caught.
+	// Deriving it is the point: a threshold copied from a different alphabet
+	// silently biases the tail, and no test of membership would catch it.
 	limit := 256 - (256 % len(codeAlphabet))
 
 	// Each round consumes one HMAC block. One block yields far more accepted
 	// symbols than CodeLength in practice, so the loop runs once; repeating with
-	// an incremented counter keeps the distribution exact in the unlikely event
-	// that it does not, without the biased padding an earlier version used.
+	// an incremented counter is what keeps the distribution exact in the unlikely
+	// event that it does not, rather than padding with a biased byte.
 	//
 	// The counter is an int written as four bytes rather than a single byte: a
 	// byte would wrap, and a wrapped counter would re-derive round 0's digest and

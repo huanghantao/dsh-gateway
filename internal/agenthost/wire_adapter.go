@@ -222,9 +222,10 @@ func errDraining() error {
 // the code so that the layer above re-derives exactly the status it would have
 // produced in-process.
 //
-// This function and fromWireError are the only two places the two vocabularies
-// meet, which is what the extra package boundary buys: everything else on either
-// side is unaware that a process boundary exists.
+// This function and fromWireError are the only two places the two *error*
+// vocabularies meet. Every other translation in this file copies a type that
+// exists on both sides, so the layers above see errx values either way and stay
+// unaware that a process boundary exists.
 func toWireError(err error) *hostwire.Error {
 	if err == nil {
 		return nil

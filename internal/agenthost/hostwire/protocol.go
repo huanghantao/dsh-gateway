@@ -41,8 +41,12 @@ import (
 // mistake that should fail loudly at connect time rather than be papered over.
 const Protocol = 1
 
-// Method names. They are the wire vocabulary; the constants exist so a typo is
-// a compile error rather than a timeout.
+// Method and notification names. They are the wire vocabulary; the constants
+// exist so a typo is a compile error rather than a timeout.
+//
+// Both kinds live in this one block because the frame tells them apart by slot,
+// not by name: `method` carries a request (gateway to host) and `event` carries
+// a notification (host to gateway). Each constant below says which it is.
 const (
 	// MethodHello identifies the caller and its epoch. It must be the first
 	// command on a connection.
@@ -54,27 +58,54 @@ const (
 	// sessions held, turns running, approvals pending.
 	MethodSnapshot = "host.snapshot"
 
-	MethodSessionList      = "session.list"
-	MethodSessionNew       = "session.new"
-	MethodSessionResume    = "session.resume"
-	MethodSessionClose     = "session.close"
+	// MethodSessionList enumerates the sessions in one workspace.
+	MethodSessionList = "session.list"
+	// MethodSessionNew creates a session in a workspace.
+	MethodSessionNew = "session.new"
+	// MethodSessionResume attaches an existing session, taking DSH's
+	// single-writer lock.
+	MethodSessionResume = "session.resume"
+	// MethodSessionClose ends a session for real, which is what makes DSH write
+	// an end to the session's own log.
+	MethodSessionClose = "session.close"
+	// MethodSessionSetConfig sets one of the harness's configuration options.
 	MethodSessionSetConfig = "session.set_config_option"
-	MethodSessionCancel    = "session.cancel"
+	// MethodSessionCancel asks the harness to stop the turn in flight.
+	MethodSessionCancel = "session.cancel"
 	// MethodSessionRelease detaches a session without ending it. It is what a
 	// lease expiring means, and it deliberately does not call DSH's
 	// session/close, which writes an end to the session's own log.
-	MethodSessionRelease       = "session.release"
-	MethodTurnSubmit           = "turn.submit"
-	MethodTurnAwait            = "turn.await"
-	MethodPermissionDecide     = "permission.decide"
-	MethodCapabilities         = "host.capabilities"
-	MethodDrain                = "host.drain"
-	MethodEvent                = "event"
-	MethodUpdate               = "update"
-	MethodState                = "state"
-	MethodTurnResult           = "turn.result"
-	MethodPermissionRequest    = "permission.request"
-	MethodPermissionResolved   = "permission.resolved"
+	MethodSessionRelease = "session.release"
+	// MethodTurnSubmit admits a prompt and answers with the turn id.
+	MethodTurnSubmit = "turn.submit"
+	// MethodTurnAwait waits for a turn to settle.
+	MethodTurnAwait = "turn.await"
+	// MethodPermissionDecide answers a permission request the host relayed.
+	MethodPermissionDecide = "permission.decide"
+	// MethodCapabilities answers the same reply as MethodHello. Nothing in this
+	// repository calls it.
+	MethodCapabilities = "host.capabilities"
+	// MethodDrain asks the host to stop accepting work and wait for the turns in
+	// flight.
+	MethodDrain = "host.drain"
+
+	// MethodEvent reports that a notification could not be handled. The
+	// transport sends it back with the handler's error, because a notification
+	// has no reply; the host logs it.
+	MethodEvent = "event"
+	// MethodUpdate is a notification carrying one harness update.
+	MethodUpdate = "update"
+	// MethodState is a notification carrying the harness's state.
+	MethodState = "state"
+	// MethodTurnResult is a notification carrying a settled turn's outcome.
+	MethodTurnResult = "turn.result"
+	// MethodPermissionRequest is a notification asking the gateway to put a
+	// permission prompt in front of a person.
+	MethodPermissionRequest = "permission.request"
+	// MethodPermissionResolved is declared for the mirror direction; nothing in
+	// this repository sends it.
+	MethodPermissionResolved = "permission.resolved"
+	// MethodDrainingNotification tells a client the host has begun draining.
 	MethodDrainingNotification = "host.draining"
 )
 
@@ -118,8 +149,8 @@ type Error struct {
 	Code string `json:"code"`
 	// Message is for a human reading a log or a problem document.
 	Message string `json:"message"`
-	// Retryable is the sender's own verdict, so a caller does not have to
-	// re-derive it from the kind.
+	// Retryable is the sender's own verdict on whether the same call could
+	// succeed later.
 	Retryable bool `json:"retryable,omitempty"`
 }
 
@@ -195,10 +226,10 @@ type HelloResult struct {
 	HostPID int `json:"hostPid"`
 	// Capabilities is what the harness advertised at its own handshake.
 	Capabilities Capabilities `json:"capabilities"`
-	// AcceptsCommands reports whether this connection is the active one. It is
-	// almost always true: the host accepts the newest connection and closes the
-	// previous one, so a caller that gets this response is by construction the
-	// current owner.
+	// AcceptsCommands is set on the hello reply. Nothing in this repository reads
+	// it: the host decides whether a connection may act by pointer identity, not
+	// by this flag, so a caller that never claimed control is refused on an
+	// acting command rather than told in advance.
 	AcceptsCommands bool `json:"acceptsCommands"`
 }
 

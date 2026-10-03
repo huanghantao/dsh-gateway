@@ -83,7 +83,7 @@ type Options struct {
 	Timeout time.Duration
 	// GrantTTL bounds a scoped decision. Zero disables scoped grants entirely:
 	// the synthesised options are not offered, and every invocation needs its
-	// own answer, which is the behaviour this gateway had before grants existed.
+	// own answer.
 	GrantTTL time.Duration
 	Bus      *events.Bus
 	Logger   *logx.Logger
@@ -349,7 +349,8 @@ func (b *Broker) Close() {
 	}
 }
 
-// offered reports whether optionID appears in options.
+// offered is the one membership test: Decide refuses an option the request did
+// not carry, and grantOptions uses it to require that an affirmative one exists.
 func offered(options []Option, optionID string) bool {
 	for _, o := range options {
 		if o.ID == optionID {

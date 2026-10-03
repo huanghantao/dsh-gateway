@@ -59,7 +59,8 @@ type Outcome string
 const (
 	// OutcomeReverted means the file was restored and written.
 	OutcomeReverted Outcome = "reverted"
-	// OutcomeSkipped means the file was not asked for.
+	// OutcomeSkipped means the undo would write what the file already holds: the
+	// change had already been reversed by hand.
 	OutcomeSkipped Outcome = "skipped"
 	// OutcomeRefused means the undo was attempted and declined, with a reason.
 	// Nothing was written.

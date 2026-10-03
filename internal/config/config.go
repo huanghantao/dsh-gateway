@@ -90,9 +90,12 @@ type Config struct {
 
 // Log configures the process logger.
 type Log struct {
-	Level     string `yaml:"level"`
-	Format    string `yaml:"format"`
-	AddSource bool   `yaml:"addSource"`
+	// Level is the minimum level to log; an unknown value falls back to info.
+	Level string `yaml:"level"`
+	// Format selects the handler; an unknown value falls back to text.
+	Format string `yaml:"format"`
+	// AddSource records the calling file and line on every record.
+	AddSource bool `yaml:"addSource"`
 }
 
 // DSH describes the managed DeepSeek Harness child process.
@@ -222,14 +225,26 @@ type Session struct {
 
 // Limits bounds request handling.
 type Limits struct {
-	MaxBodyBytes       int64    `yaml:"maxBodyBytes"`
-	ReadHeaderTimeout  Duration `yaml:"readHeaderTimeout"`
-	ReadTimeout        Duration `yaml:"readTimeout"`
-	WriteTimeout       Duration `yaml:"writeTimeout"`
-	IdleTimeout        Duration `yaml:"idleTimeout"`
-	ShutdownTimeout    Duration `yaml:"shutdownTimeout"`
-	MaxPromptBytes     int      `yaml:"maxPromptBytes"`
-	MaxConcurrentTurns int      `yaml:"maxConcurrentTurns"`
+	// MaxBodyBytes caps one request body. The default is 8 MiB rather than the
+	// 1 MiB a text-only prompt needed, because a phone photograph is a few
+	// megabytes: this ceiling has to clear MaxImageBytes before that can mean
+	// anything.
+	MaxBodyBytes int64 `yaml:"maxBodyBytes"`
+	// ReadHeaderTimeout bounds how long a client may take over its headers.
+	ReadHeaderTimeout Duration `yaml:"readHeaderTimeout"`
+	// ReadTimeout bounds one request read.
+	ReadTimeout Duration `yaml:"readTimeout"`
+	// WriteTimeout is 0 by default: streaming responses and the WebSocket own
+	// their deadlines.
+	WriteTimeout Duration `yaml:"writeTimeout"`
+	// IdleTimeout is how long a keep-alive connection may sit idle.
+	IdleTimeout Duration `yaml:"idleTimeout"`
+	// ShutdownTimeout bounds the graceful shutdown before connections are cut.
+	ShutdownTimeout Duration `yaml:"shutdownTimeout"`
+	// MaxPromptBytes bounds one prompt's text.
+	MaxPromptBytes int `yaml:"maxPromptBytes"`
+	// MaxConcurrentTurns caps how many turns run at once across all sessions.
+	MaxConcurrentTurns int `yaml:"maxConcurrentTurns"`
 	// MaxImageBytes bounds one image prompt block, decoded. Zero — the default —
 	// means no bound tighter than the request body limit, which is what actually
 	// caps a request in practice: the body carries an image base64-encoded, so it
@@ -695,8 +710,6 @@ const AgentHostSocket = "agent-host.sock"
 // reads as a deliberate statement rather than a line that does nothing.
 const DSHModeAgentHost = "agent-host"
 
-// SessionsDir is the DSH session store this deployment reads history from. It
-// follows DSH_HOME, because the phone and the desktop have to see one store.
 // SessionsDir returns the effective session-log root: where DSH keeps the logs
 // this deployment reads history from. It follows DSH_HOME, because the phone and
 // the desktop have to see one store.

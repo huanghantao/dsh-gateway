@@ -7,16 +7,16 @@ import (
 	"syscall"
 )
 
+// supportsFlock reports whether this platform can answer the question at all.
+// Tests use it to skip rather than to assert something the platform cannot do.
+func supportsFlock() bool { return true }
+
 // lockHeld reports whether another process holds an exclusive flock on a file.
 //
 // The lock is taken with LOCK_NB and released immediately: the question is
 // "would acquiring it block", and the answer is the only thing wanted. A file
 // that cannot even be opened is reported as not held, because a lock nobody can
 // look at is not evidence that someone is writing.
-// supportsFlock reports whether this platform can answer the question at all.
-// Tests use it to skip rather than to assert something the platform cannot do.
-func supportsFlock() bool { return true }
-
 func lockHeld(path string) bool {
 	file, err := os.Open(path) //nolint:gosec // a path derived from a validated session id
 	if err != nil {

@@ -57,8 +57,9 @@ type overlay struct {
 type Decision struct {
 	Archived bool `json:"archived"`
 	Pinned   bool `json:"pinned"`
-	// FromDesk is true when DSH's own store is the reason, so a client can say
-	// "archived on the desktop" and not offer an undo it cannot perform.
+	// ArchivedOnDesk and PinnedOnDesk say that DSH's own store is the reason, so
+	// a client can say "archived on the desktop" and not offer an undo it cannot
+	// perform.
 	ArchivedOnDesk bool `json:"archivedOnDesk,omitempty"`
 	PinnedOnDesk   bool `json:"pinnedOnDesk,omitempty"`
 }

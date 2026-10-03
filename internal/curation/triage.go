@@ -134,8 +134,9 @@ func DefaultRules() Rules {
 
 // WithPatterns returns a copy of the rules whose title evidence is the default
 // set plus extra, so a deployment can teach triage its own harness's noise
-// without losing the portable shapes. An uncompilable extra is ignored: a bad
-// pattern should cost a candidate, not a panic on the sessions screen.
+// without losing the portable shapes. An uncompilable extra is rejected, naming
+// the offending setting: a bad pattern should be reported at configuration time,
+// not silently cost a candidate.
 func (r Rules) WithPatterns(extra []string) (Rules, error) {
 	kept := make([]string, 0, len(extra))
 	for _, pattern := range extra {

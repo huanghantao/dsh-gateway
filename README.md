@@ -16,7 +16,7 @@ HOME MAC:  frpc ◀────────────────────�
         dsh-gateway ──▶ /m/            mobile PWA
                     ──▶ /api/v1/*      versioned API (REST + WebSocket)
                     ──▶ ACP stdio ──▶ dsh --profile acp
-                    ──▶ read-only  ──▶ ~/.dsh/sessions/*.jsonl.zstd
+                    ──▶ read-only  ──▶ ~/.dsh/sessions/<workspace>/<id>/session.v4.jsonl.zstd
                     ──▶ undo only  ──▶ your files   (off unless enabled)
 ```
 
@@ -277,7 +277,7 @@ therefore needs Node and npm on `PATH`, which a working `dsh` install (itself an
 npm package) already implies. The frontend has one devDependency and no bundler,
 so that step is a `tsc` run over `web/src`.
 
-The test suite has three tiers:
+The test suite has four tiers:
 
 - **Unit** — run everywhere, no external dependencies.
 - **Integration** — drive a real `dsh --profile acp` child. Skipped automatically

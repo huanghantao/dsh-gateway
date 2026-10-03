@@ -48,7 +48,9 @@ whether a pairing attempt is answered.
 **Mutating requests** must additionally present an `Origin` header equal to the
 request `Host`, or be rejected `403`. This is the CSRF control.
 
-**Timestamps** are RFC 3339 with milliseconds, always UTC.
+**Timestamps** are RFC 3339, always UTC, with fractional seconds omitted when
+they are zero — do not parse a fixed number of digits. `GET /trash` reports
+`deletedAt` to the second.
 
 **Identifiers** are opaque strings. Do not parse them.
 
@@ -85,7 +87,7 @@ client does not have to probe and fail:
 {
   "id": "dev_…", "name": "iPhone", "createdAt": "…", "expiresAt": "…",
   "limits": { "maxPromptBytes": 262144, "maxBodyBytes": 8388608,
-              "maxImageBytes": 0, "transcriptPage": 50 },
+              "maxImageBytes": 8388608, "transcriptPage": 50 },
   "features": { "transcript": true, "desktopUI": false, "imagePrompts": true,
                 "approvalTimeoutSecs": 300, "sessionIdleTimeoutSec": 300,
                 "approvalGrantTTLSecs": 1800, "promptQueueDepth": 4,
@@ -309,7 +311,7 @@ none.
 | `GET` | `/sessions?workspace=&cursor=&limit=` | Persisted sessions, newest first. |
 | `POST` | `/sessions` | Create a session. |
 | `GET` | `/sessions/{id}` | One session's metadata. |
-| `POST` | `/sessions/{id}/lease` | Attach the session; body `{}`. Idempotent. |
+| `POST` | `/sessions/{id}/lease` | Attach the session; idempotent. Body may carry `workspace`, and `pinned: true` keeps the lease alive indefinitely. |
 | `DELETE` | `/sessions/{id}/lease` | Detach and release the DSH write lock. |
 | `GET` | `/sessions/{id}/transcript?before=&limit=` | Read-only history projection. |
 | `GET` | `/sessions/triage` | Sessions the gateway suggests archiving, each with a reason. |
@@ -324,7 +326,7 @@ none.
 | `DELETE` | `/sessions/{id}/queue/{turnId}` | Drop one waiting prompt. |
 | `GET` | `/sessions/{id}/changes` | What the session changed, from its own log. |
 | `POST` | `/sessions/{id}/revert` | Undo recorded changes. Off by default. |
-| `PATCH` | `/sessions/{id}` | Change `model` or `reasoningEffort`. |
+| `PATCH` | `/sessions/{id}` | Change `model` or `reasoningEffort`, or make one curation decision (`archived` or `pinned`). |
 
 ### `POST /sessions`
 
@@ -445,10 +447,11 @@ queue is `409 queue_full`, and a depth of `0` restores the strict behaviour, whe
 a mid-turn prompt is `409 prompt_in_flight`.
 
 Images are the second block type. `data` is standard base64, padded or not, and
-the decoded size is checked against `limits.maxImageBytes` — or against
-`limits.maxBodyBytes` when that is `0`. Accepted types are `image/png`,
-`image/jpeg`, `image/webp` and `image/gif`; anything else is
-`400 unsupported_image_type`, and `GET /me` reports `features.imagePrompts`
+the decoded size is checked against `limits.maxImageBytes`, which `GET /me`
+reports as the *effective* limit: a configured `maxImageBytes` of `0` is
+substituted with `limits.maxBodyBytes` rather than reported as zero. Accepted
+types are `image/png`, `image/jpeg`, `image/webp` and `image/gif`; anything else
+is `400 unsupported_image_type`, and `GET /me` reports `features.imagePrompts`
 so a client can avoid offering the control at all.
 
 Prompt text is limited to `limits.maxPromptBytes`.
@@ -895,7 +898,8 @@ release is to hand it back so the desktop can open it.
 
 ## Health
 
-These are mounted at the site root, not under `/api/v1`.
+These are mounted at the site root, and under `/api/v1` as an alias (see
+Conventions).
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|

@@ -123,8 +123,9 @@ type ApprovalDecision struct {
 	// SessionID is redundant with the envelope's, and carried anyway because a
 	// notification is composed from the payload alone.
 	SessionID string `json:"sessionId,omitempty"`
-	// GrantID is set when the decision came from a standing grant rather than
-	// from a person answering this prompt.
+	// GrantID is declared for a decision that came from a standing grant. No
+	// producer sets it today: the grant path publishes TypeApprovalGranted
+	// instead, so a reader always sees this empty.
 	GrantID string `json:"grantId,omitempty"`
 }
 
@@ -174,12 +175,8 @@ type SessionTurn struct {
 	Queued []TurnState `json:"queued,omitempty"`
 }
 
-// Draining is the payload of TypeDraining.
-//
-// It is its own frame, rather than part of HarnessState, because it says the
-// opposite about the agent: the harness is fine, and it is the process in front
-// of it that is leaving. A client that folded the two together would announce a
-// crash for a redeploy.
+// Draining is the payload of TypeDraining; see that constant for why it is its
+// own frame rather than part of HarnessState.
 type Draining struct {
 	// Reason is a sentence for a human, not a code to branch on.
 	Reason string `json:"reason"`

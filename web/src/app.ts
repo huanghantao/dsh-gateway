@@ -8,7 +8,7 @@
  * `store.route` means there is exactly one place that answers "what is on
  * screen", instead of a `hashchange` handler racing a fetch.
  *
- * The shell is also where the two always-present region live: the approval host
+ * The shell is also where the two always-present regions live: the approval host
  * (Screen 4 must be answerable from any screen) and the notice host, which is a
  * polite live region so a transient confirmation is announced rather than
  * merely shown.

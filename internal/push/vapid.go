@@ -87,10 +87,9 @@ func (v *VAPID) PublicKey() string { return v.publicKey }
 // encodeP256Point renders a public key the way a browser expects it: the
 // uncompressed point, 0x04 followed by X and Y.
 //
-// This used to be elliptic.Marshal, which is deprecated as a low-level unsafe
-// API. The bytes are identical — ecdh.PublicKey.Bytes documents exactly this
-// encoding — so a subscription created against the old build keeps working, and
-// the deprecation is honoured rather than silenced.
+// The bytes are `ecdh.PublicKey.Bytes`' uncompressed point, identical to what
+// `elliptic.Marshal` produced, so a subscription created before the move keeps
+// working.
 func encodeP256Point(pub *ecdh.PublicKey, err error) (string, error) {
 	if err != nil {
 		return "", err

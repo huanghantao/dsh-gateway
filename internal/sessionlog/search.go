@@ -196,7 +196,6 @@ var markdownMarkers = strings.NewReplacer("**", "", "__", "", "`", "", "### ", "
 // because it looks like the session contains mojibake.
 func snippet(text string, byteIndex, byteLength int) string {
 	runes := []rune(text)
-	// Convert the byte offset into a rune offset.
 	runeIndex := len([]rune(text[:byteIndex]))
 	matchRunes := len([]rune(text[byteIndex : byteIndex+byteLength]))
 
