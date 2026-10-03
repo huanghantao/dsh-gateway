@@ -63,6 +63,13 @@ installers have been exercised on.
   after revocation or expiry, or a path that leaks either into a log.
 - The approval surface failing open: a tool call that runs without a human, or
   one that keeps running after the timeout that should have refused it.
+- **A scoped approval outliving its scope.** `allow-session-tool` and
+  `allow-exact` are the one way a tool can run without a person answering *this*
+  prompt, so anything that lets a grant apply to another session, to another
+  tool, past `session.approvalGrantTTL`, or after the session it was made in was
+  released is a finding. So is `changes.revert.enabled` reaching a file outside
+  the workspace allowlist, writing through a symlink that leaves one, or
+  reversing a change whose recorded text no longer matches exactly.
 - Sandbox or workspace-allowlist escape: reaching a path outside a configured
   workspace root, or a session the operator did not open.
 - Injection through the proxy, the session-log parser, or the API — including
@@ -86,7 +93,14 @@ this policy assumes:
 - **sslip.io is a third-party DNS service** (§9.6); whoever controls the answer
   controls where the name points at bootstrap time.
 - **A device token has full authority.** There is no per-device least privilege
-  and no read-only mode; revoking the device is the control.
+  and no read-only mode; revoking the device is the control. That includes the
+  ability to create a scoped approval grant or to undo a session's file changes,
+  when the operator has enabled either.
+- **`session.approvalGrantTTL` grants a standing authorisation** limited to one
+  session, one tool and one lifetime, and `changes.revert.enabled` lets the
+  gateway write to your files. Both are documented trades with their bounds in
+  §6.1 and §1.1; a report that they exist is not a vulnerability, but a report
+  that either exceeds its stated bound is.
 - **The desktop machine is trusted.** An attacker who can already run code as
   your user does not need this gateway.
 - **DSH itself.** Vulnerabilities in DeepSeek Harness, in the model provider, or

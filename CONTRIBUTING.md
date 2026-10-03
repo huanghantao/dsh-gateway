@@ -111,8 +111,17 @@ Anything touching authentication, the approval path, the workspace allowlist, th
 session-log parser or the proxy needs a careful look, and the reasoning belongs
 in the commit body. Two rules that are not negotiable in review:
 
-- **Approvals fail closed.** An unanswered approval is refused, never allowed.
-  Nothing is ever auto-approved.
+- **Approvals fail closed.** An unanswered approval is refused, never allowed,
+  and no code path approves without a human decision. A scoped grant
+  (`allow-session-tool`, `allow-exact`) is a decision a person made, bounded to
+  one session, one tool and `session.approvalGrantTTL` — anything that widens
+  that bound, or lets a grant outlive the session it was made in, is a bug in the
+  approval path rather than a feature of it.
+- **One writer, one reader.** `internal/workspace` is the only package that opens
+  a file for writing, and `internal/app/turns` is the only thing that knows
+  whether a turn is running. Both exist so that a property this project claims —
+  read-only over your workspace, one turn at a time per session — is enforced in
+  one auditable place rather than asserted in several.
 - **A security invariant is enforced, not documented.** If a value would weaken
   one — a non-loopback bind, a plaintext webhook, a workspace root that is the
   whole home directory — it is rejected at startup or at install time rather than

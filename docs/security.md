@@ -24,16 +24,54 @@ and it is designed accordingly:
 * It has no listener on any public interface, ever (§3).
 * It has exactly one credential type — a device token — and no user accounts,
   no password reset, and no administrative endpoint that mints credentials.
-* It never auto-approves a tool call: a human decision is required, and a missing
-  decision is a rejection (§6).
+* It never approves a tool call that no human authorised: a decision is required,
+  and a missing decision is a rejection. A decision may name a *scope* — this
+  tool, in this session, for a bounded time — which is a change from earlier
+  versions and is set out in §6.1.
 * Its blast radius is bounded by an allowlist of workspace roots, an approval
   prompt for anything the sandbox does not permit, and a device record you can
   revoke in one request.
+* It writes to your files only if you turn that on, and then only to undo a
+  change the session recorded (§1.1).
 
 What it is *not*: a multi-tenant service, a sandbox for untrusted users, or a
 safe way to give someone else access to your machine. Every paired device has
 your full authority, minus what the agent's sandbox and approvals withhold. There
 is no per-device least privilege to grant.
+
+### 1.1 The one path that writes
+
+Everything else in this document assumes the gateway is read-only over your
+workspace, and until now that was unconditionally true: it read DSH's session
+logs, and it never opened one of your files for writing.
+
+One feature changes that, and it is off by default. `changes.revert.enabled`
+lets an operator undo the file changes a session recorded, which means the
+gateway can write inside the configured workspace roots. Three things bound it:
+
+* **It is absent, not disabled.** With the setting off, the gateway constructs no
+  reverter at all and `POST /sessions/{id}/revert` answers `503
+  revert_disabled`. There is no reachable code path that writes.
+* **It refuses rather than guesses.** An undo reverses a change only when the
+  text the change recorded is present in the file *exactly once*. A file that has
+  moved on since — because you edited it, or another tool did — is refused with a
+  reason, not fuzzy-matched. A whole-file write is refused outright, because the
+  log does not record what the file held before it. The only files it will touch
+  are ones inside the allowlist, with symlinks resolved first so a link inside the
+  workspace cannot point out of it.
+* **It refuses while the agent is working.** A turn in flight, or another process
+  driving the session, is a `409`: undoing files underneath a running agent
+  produces a tree that matches neither what the agent wrote nor what it held
+  before.
+
+Every undone file is recorded in the audit log as `workspace.reverted`, with the
+paths and the device that asked. That event is the only audit record describing a
+change *this gateway made* to a workspace rather than one it observed, which
+makes it the first place to look when a file is not what someone left it as.
+
+Reading what a session changed needs none of this: `GET
+/sessions/{id}/changes` is a projection of the session log and never touches the
+workspace.
 
 ---
 
@@ -335,20 +373,68 @@ existing devices stay valid, which is usually what you want).
 
 ---
 
-## 6. Approvals are never auto-approved, and fail closed
+## 6. Every tool is authorised by a human, once per scope, and fails closed
 
 When the agent wants to run something the sandbox does not already permit, DSH
 emits an approval request. The gateway publishes `approval.requested` and the
-agent blocks. Only a human decision releases it:
+agent blocks until a human answers:
 
 * `session.approvalTimeout` (5 minutes by default) bounds the wait, and **on
   expiry the request is rejected**. There is no "allow on timeout" path, and no
-  code that decides an approval without a decision from a client.
+  code path that approves without a decision from a human.
 * Deciding an unknown, expired or already-decided approval returns
   `409 approval_closed`.
 * `approval.decided` — with the option chosen — is the most important record in
   the audit log, because it is the trace of a human authorising a command on
   their machine.
+
+### 6.1 Scoped decisions, and what they change
+
+DSH offers exactly two choices: allow once, and reject once. The gateway adds two
+of its own, and this is the one place where the security posture of an earlier
+version changed rather than being extended — so it is worth being precise about.
+
+A turn that edits six files and runs a dozen commands asks a dozen times, each
+with a five-minute clock, and one missed prompt is a refusal that stops the
+agent. On a desktop that is an annoyance; on a phone it is the difference between
+delegating work and babysitting it. So a decision may now carry a **scope**:
+
+| Option | What it authorises |
+|---|---|
+| `allow-once` | this invocation (DSH's own) |
+| `reject-once` | this invocation (DSH's own) |
+| `allow-session-tool` | this tool, in this session, until the grant expires |
+| `allow-exact` | this tool with exactly these arguments, in this session, until the grant expires |
+
+The property that is preserved is the one that matters: **no tool runs that a
+human did not authorise.** What changed is that the authorisation can name a
+scope. A grant is bounded on three axes and none of them is optional — one
+session, one tool (and for an exact grant, one identical argument string), and
+`session.approvalGrantTTL` (30 minutes by default).
+
+* Grants live in memory only. A gateway restart clears them, and a rule that
+  outlived the process would be one nobody remembers agreeing to.
+* A grant dies with its session: releasing the lease revokes every grant made in
+  it, because an authorisation for work that is finished must not apply to
+  whatever runs in that session next.
+* Matching is on the exact argument bytes the harness reported. A grant that
+  matched "the same command with different whitespace" would be one whose scope
+  the operator cannot predict from what they were shown.
+* `GET /approvals/grants` lists what is in force and `DELETE
+  /approvals/grants/{id}` withdraws it. Every automated yes is announced as
+  `approval.granted`, so the transcript shows that a tool ran without anyone
+  answering *this* prompt, and the audit log records both ends.
+* **`session.approvalGrantTTL: 0` disables scoped grants entirely.** The
+  synthesised options are then not offered at all, and every invocation needs its
+  own answer — the behaviour every earlier version had.
+
+Residual risk, stated plainly: a tool-scoped grant authorises *any* invocation of
+that tool in that session, including one nobody has seen. That is the trade, and
+it is why the exact-argument scope exists beside it and why the lifetime is
+short. An operator who wants the narrower posture should set
+`session.approvalGrantTTL: 0`, or use `allow-exact` rather than
+`allow-session-tool`. The app shows the remaining lifetime of every live grant
+and offers to withdraw it.
 
 The gateway also sets the child's sandbox mode explicitly
 (`dsh.sandboxMode`, default `workspace-write`) rather than letting it inherit the
@@ -360,8 +446,9 @@ UI apparently working while never asking anything. The gateway warns at startup
 if that mode is configured.
 
 Residual risk, stated plainly: an attacker holding a device token is
-indistinguishable from you, so they can approve. Approvals bound the *agent's*
-autonomy and provide the audit trail; they are not a second factor.
+indistinguishable from you, so they can approve — and can create a scoped grant,
+which is a standing authorisation. Approvals bound the *agent's* autonomy and
+provide the audit trail; they are not a second factor.
 
 ---
 
@@ -584,7 +671,17 @@ a restart instead of `caddy reload`.
 * **In-memory rate-limit state resets on restart** (§7).
 * **`maxPromptBytes` (256 KiB) and `maxConcurrentTurns` (4)** bound abuse of the
   prompt path, but there is no cost control: a paired device can spend your model
-  quota until you revoke it.
+  quota until you revoke it. An image block is bounded by `maxBodyBytes` (8 MiB)
+  or by `maxImageBytes` when that is set.
+* **The change screen under-reports, and says so.** It projects `edit` and
+  `write` from the session log, so a file changed by any other means — a `bash`
+  command running `sed -i`, an editor the agent opened — is not listed, and
+  `GET /sessions/{id}/changes` names its source (`tool-calls`) rather than
+  implying it knows everything. This is a completeness limit, not a disclosure
+  one: the projection never reads a file it reports on.
+* **`session.promptQueueDepth` (4)** bounds how much work one session can have
+  waiting. A queued prompt is not a promise: `POST /sessions/{id}/cancel` drops
+  the queue along with the turn, which is what "stop" means.
 * **The audit log is one generation deep** (§8).
 * **`open` workspaces are exactly the configured roots.** The client cannot name
   a path, but *within* an allowed root the agent can do anything the sandbox and
@@ -608,16 +705,23 @@ Ordered by value per unit of effort:
    trust, or copy the root out of band (deployment.md §5.1), and remove the
    profile when the deployment is retired (deployment.md §7.9).
 4. Keep `dsh.sandboxMode: workspace-write`; never `danger-full-access` (§6).
-5. Set `FRP_CONTROL_ALLOW_FROM=<your-ip>/32` if your Mac has a stable address
+5. Decide about scoped approvals deliberately. `session.approvalGrantTTL: 0` is
+   the narrowest posture and needs no thought; leaving the default means a
+   decision can cover a whole session's use of one tool for half an hour, which
+   is what makes a long turn workable from a phone (§6.1). Leave
+   `changes.revert.enabled: false` unless you want the gateway to be able to
+   write to your files at all (§1.1).
+6. Set `FRP_CONTROL_ALLOW_FROM=<your-ip>/32` if your Mac has a stable address
    (deployment.md §3).
-6. Pin the frps certificate and set `transport.tls.trustedCaFile` on the Mac
+7. Pin the frps certificate and set `transport.tls.trustedCaFile` on the Mac
    (§9.7).
-7. Lower `auth.sessionTTL` from 30 days if the phone is shared.
-8. Review `~/.dsh-gateway/devices.json` and the app's device list monthly; revoke
-   what you do not recognise.
-9. Read `audit.jsonl` after anything unusual, and rotate the frp token if
-   `journalctl -u frps | grep "client login info"` shows a stranger.
-10. Keep both sides updated: the phone's PWA, the gateway binary, and DSH itself
+8. Lower `auth.sessionTTL` from 30 days if the phone is shared.
+9. Review `~/.dsh-gateway/devices.json` and the app's device list monthly; revoke
+   what you do not recognise. The settings screen also lists the standing
+   approvals in force, which is the other thing worth a look.
+10. Read `audit.jsonl` after anything unusual, and rotate the frp token if
+    `journalctl -u frps | grep "client login info"` shows a stranger.
+11. Keep both sides updated: the phone's PWA, the gateway binary, and DSH itself
     (§9.5).
 
 ---

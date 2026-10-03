@@ -17,6 +17,7 @@ HOME MAC:  frpc ◀────────────────────�
                     ──▶ /api/v1/*      versioned API (REST + WebSocket)
                     ──▶ ACP stdio ──▶ dsh --profile acp
                     ──▶ read-only  ──▶ ~/.dsh/sessions/*.jsonl.zstd
+                    ──▶ undo only  ──▶ your files   (off unless enabled)
 ```
 
 ## Why it is shaped this way
@@ -41,11 +42,24 @@ established by reading and probing a real installation rather than assumed:
 ## What you get
 
 - **A mobile web app** at `/m/`, installable to your home screen, for the loop
-  you actually use on a phone: browse sessions, read history, send prompts, watch
-  tools run, approve or refuse them, switch model and reasoning effort.
-- **Approvals that mean something.** Nothing is ever auto-approved. Every tool
-  that needs authorisation is shown with its exact arguments, and anything
-  unanswered within the timeout is **refused**.
+  you actually use on a phone: browse sessions, read history, send prompts
+  (photographs and screenshots included), watch tools run, approve or refuse
+  them, queue a follow-up while the agent works, stop a turn, switch model and
+  reasoning effort.
+- **Approvals that mean something, at a granularity you choose.** Every tool that
+  needs authorisation is shown with what it will actually do — a real change for
+  an edit, a warning for a command that looks destructive — and anything
+  unanswered within the timeout is **refused**. A decision can name a scope
+  ("this tool, in this session, for the next half hour") so that a long turn does
+  not need a tap per tool call; every such authorisation is listed, bounded and
+  withdrawable, and `session.approvalGrantTTL: 0` removes the option entirely.
+- **What the session changed, and a way to put it back.** A change screen built
+  from the agent's own record of its edits: which files, how many lines, and the
+  changes themselves. Undo is available when you turn it on, exact-match only,
+  and never while the agent is running.
+- **A follow-up is not lost.** Prompts typed while a turn runs are queued rather
+  than refused, and a turn that has been going a while shows how long and what it
+  is doing now.
 - **Your desktop sessions.** The gateway reads DSH's own session store, so a
   conversation you started at your desk shows up on your phone with its history
   and title.
@@ -196,9 +210,14 @@ makes it a first-class concept:
   request a lease.
 - The lease is released when the last client goes away, after
   `session.idleTimeout` (default 5 minutes) with nothing happening.
-- A turn in flight pins the lease; nothing releases a session mid-turn.
+- A turn in flight pins the lease; nothing releases a session mid-turn. The
+  scheduler answers that question, so "mid-turn" has exactly one definition.
+- Releasing a session drops any standing approval grants made in it: an
+  authorisation for work that is finished must not apply to whatever runs there
+  next.
 - `GET /sessions/{id}` reports `leased`, so the app can tell you *why* your
-  desktop is refusing to open something.
+  desktop is refusing to open something. It also reports the turn in flight and
+  anything queued behind it.
 
 ## Design
 
@@ -209,13 +228,22 @@ fit together. The dependencies point inward:
 |---|---|---|
 | Ports | `internal/harness`, `internal/authn` | nothing but the standard library |
 | Adapters | `internal/harness/acp`, `internal/authn/devicetoken`, `internal/sessionlog`, `internal/edge` | one external system each |
-| Application | `internal/app/{events,lease,approvals,bridge}` | the ports |
+| Application | `internal/app/{events,lease,turns,approvals,bridge}` | the ports |
 | Driving adapter | `internal/httpapi/v1`, `web` | the application |
 | Composition | `cmd/dsh-gateway` | everything, and nothing else does |
 
 Nothing above the adapter layer mentions ACP, stdio, or JSON-RPC. Swapping the
 ACP adapter for an in-process bridge — which would enable mirroring a live
 desktop session — is a change in one package.
+
+Two of those packages own a decision worth knowing about before you change them.
+`internal/app/turns` is the only thing that knows whether a turn is running:
+the lease asks it rather than keeping a flag of its own, because two copies of
+that answer is one copy too many, and the copy that used to live in the prompt
+handler could disagree with reality under a double tap. `internal/workspace` is
+the only thing that opens one of your files for writing, and a deployment that
+leaves undo off constructs no instance of it, so the write path is absent rather
+than disabled.
 
 Four runtime dependencies, each earning its place:
 

@@ -17,8 +17,15 @@ where a feature is off unless you turn it on, that is stated.
   anywhere. The transcript projection is read-only and is documented in
   [ADR 0002](docs/adr/0002-project-the-session-log-read-only.md).
 - **Your files.** The agent reads and writes them under DSH's own sandbox; the
-  gateway only passes tool calls through and shows you their arguments so you can
-  approve them.
+  gateway passes tool calls through and shows you their arguments so you can
+  approve them. It reads your files only when you turn undo on, and even then
+  only the files a session recorded a change to. A photograph you attach to a
+  prompt is sent to the harness as part of that prompt, and the transcript
+  projection keeps a *count* of attachments rather than the image itself.
+- **What a session changed.** The change screen is a projection of the session
+  log — the file tools' own recorded arguments — so it is answered without
+  reading your workspace at all. See
+  [ADR 0006](docs/adr/0006-project-changes-and-separate-undo.md).
 - **Search queries.** Search is a bounded read-only scan over the same local
   files, with no index built or persisted ([`internal/sessionlog/search.go`](internal/sessionlog/search.go)).
   The query travels in a URL query string, which the access log deliberately does
@@ -100,8 +107,11 @@ is not.
 
 ### The audit log
 
-It records **no prompt text**. `prompt.sent` carries the device, the turn id and
-a block count. `approval.decided` carries the tool's name, the byte length of its
+It records **no prompt text**. `prompt.sent` carries the device, the turn id, a
+block count and whether the prompt was admitted as running or queued.
+`workspace.reverted` — written only when undo is enabled — carries the device and
+the paths it wrote to, because that is the record of a change this gateway made
+to your files rather than one it observed. `approval.decided` carries the tool's name, the byte length of its
 arguments and a SHA-256 of them — enough to tie a decision to the call it
 authorised, not enough to be a second copy of your files.
 
