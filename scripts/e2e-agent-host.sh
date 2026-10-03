@@ -172,7 +172,6 @@ while kill -0 "$HOST_PID" 2>/dev/null; do
 done
 wait "$HOST_PID" 2>/dev/null || true
 HOST_PID=""
-if kill -0 "$HOST_PID" 2>/dev/null; then :; fi
 ok "the host stopped on SIGTERM"
 
 # The socket file may remain (SIGTERM removes it, SIGKILL would not), and either

@@ -112,11 +112,6 @@ func Wrap(cause error, kind Kind, code, msg string) *Error {
 	return &Error{Kind: kind, Code: code, Msg: msg, Err: cause}
 }
 
-// Wrapf is Wrap with a formatted message.
-func Wrapf(cause error, kind Kind, code, format string, args ...any) *Error {
-	return Wrap(cause, kind, code, fmt.Sprintf(format, args...))
-}
-
 // As reports whether err is or wraps an *Error, and if so returns it.
 func As(err error) (*Error, bool) {
 	var target *Error

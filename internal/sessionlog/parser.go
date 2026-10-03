@@ -159,11 +159,10 @@ func (p *parser) feed(line []byte) {
 		p.meta.TurnCount++
 
 	default:
-		// Everything else — step boundaries, request headers, sandbox and
-		// approval policy records — is internal bookkeeping that a phone
-		// transcript has no use for. Skipping unknown types rather than
-		// rejecting them is what lets DSH add new event kinds without breaking
-		// history rendering.
+		// Everything else — step boundaries, sandbox and approval policy
+		// records — is internal bookkeeping that a phone transcript has no use
+		// for. Skipping unknown types rather than rejecting them is what lets
+		// DSH add new event kinds without breaking history rendering.
 	}
 }
 
@@ -180,14 +179,10 @@ type injectedMessage struct {
 	} `json:"content"`
 	Source *struct {
 		Kind string `json:"kind"`
-		Form string `json:"form"`
 		// Summary is the harness's own one-line account of the notice.
 		Summary string `json:"summary"`
-		// SenderSessionID names the child a relay or settlement came from.
-		SenderSessionID string `json:"senderSessionId"`
 	} `json:"source"`
-	Role string `json:"role"`
-	ID   string `json:"id"`
+	ID string `json:"id"`
 }
 
 // feedInboxSplice reads an `agent/inbox/spliced` event for the one thing in it a

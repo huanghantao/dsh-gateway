@@ -106,8 +106,8 @@ type Server struct {
 // session is one session this host holds.
 //
 // Holding it is what takes DSH's single-writer lock, so the set of these *is*
-// the set of sessions the desktop cannot open — which is why an idle one is
-// released rather than kept for convenience.
+// the set of sessions the desktop cannot open. That is why a lease expiring must
+// not close one: see handleRelease for what it does instead.
 type session struct {
 	info hostwire.SessionInfo
 
@@ -176,10 +176,6 @@ func New(opts Options) (*Server, error) {
 	s.harness = child
 	return s, nil
 }
-
-// Epoch names this host process. A caller that sees it change knows every turn
-// it was awaiting is gone.
-func (s *Server) Epoch() string { return s.epoch }
 
 // Start launches the harness child and begins serving turns.
 func (s *Server) Start(ctx context.Context) error {
@@ -657,10 +653,11 @@ func (s *Server) handleCancel(r *hostwire.Request) error {
 	sess.pending = map[string]*pendingPermission{}
 	sess.mu.Unlock()
 
-	// The harness is asked to stop before anything local is torn down: it is
-	// the only thing that can stop the tool that is actually running.
+	// Local state is settled first: this session's pending decisions are refused
+	// here, so a prompt for a tool that is about to stop cannot arrive
+	// afterwards. The harness is then asked to stop the tool that is actually
+	// running, which is the only thing that can.
 	err := s.harness.Cancel(context.Background(), params.SessionID)
-	_ = running
 	return r.Reply(nil, err)
 }
 
@@ -786,7 +783,6 @@ func (s *Server) runTurn(ctx context.Context, sess *session, t *turn, blocks []h
 	}
 	sess.mu.Unlock()
 	s.sessionsMu.Unlock()
-	_ = sess
 
 	t.finish(result)
 	s.logger.Info("turn settled",
@@ -888,14 +884,12 @@ func (s *Server) CancelRunning(reason string) {
 			_ = s.harness.Cancel(context.Background(), sess.info.ID)
 		}
 	}
-	_ = reason
 }
 
 // DrainAndWait asks the child to stop after in-flight turns finish, bounded by
 // DrainTimeout. It returns how many turns were still running when it gave up.
 func (s *Server) DrainAndWait(ctx context.Context, reason string) int {
 	s.beginDrain(reason)
-	s.cancelRunningIfIdle()
 
 	deadline := time.NewTimer(s.opts.DrainTimeout)
 	defer deadline.Stop()
@@ -921,10 +915,6 @@ func (s *Server) DrainAndWait(ctx context.Context, reason string) int {
 		}
 	}
 }
-
-// cancelRunningIfIdle is the "nothing to wait for" fast path, so a drain with no
-// work in flight is instantaneous.
-func (s *Server) cancelRunningIfIdle() {}
 
 /* --------------------------------------------------------------- bookkeeping */
 

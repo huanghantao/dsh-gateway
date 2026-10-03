@@ -58,22 +58,22 @@ func TestDrainIsIdempotentAndAnnouncedOnce(t *testing.T) {
 	}
 }
 
-// TestAdmitRefusesWhileDraining pins the door. A prompt accepted by a process
-// that is about to close the agent underneath it is a turn the drain did not
-// wait for: accepted with a 202 and then destroyed.
-func TestAdmitRefusesWhileDraining(t *testing.T) {
+// TestErrDrainingIsRetryable pins the door's answer. A prompt accepted by a
+// process that is about to close the agent underneath it is a turn the drain did
+// not wait for: accepted with a 202 and then destroyed. The refusal has to read
+// as "retry" rather than "conflict", because a client has something useful to do
+// with the first and nothing to do with the second.
+func TestErrDrainingIsRetryable(t *testing.T) {
 	life := New(nil, logx.Discard())
-
-	if err := life.Admit(); err != nil {
-		t.Fatalf("Admit() before draining = %v, want nil", err)
+	if !life.Serving() {
+		t.Fatal("a fresh lifecycle does not report serving")
 	}
-
 	life.Drain(ReasonShutdown)
-
-	err := life.Admit()
-	if err == nil {
-		t.Fatal("Admit() while draining = nil, want a refusal")
+	if !life.Draining() {
+		t.Fatal("Draining() = false after Drain")
 	}
+
+	err := ErrDraining()
 	if kind := errx.KindOf(err); kind != errx.KindUnavailable {
 		t.Errorf("refusal kind = %v, want KindUnavailable (a retryable 503)", kind)
 	}

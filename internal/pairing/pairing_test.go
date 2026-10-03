@@ -588,10 +588,11 @@ func TestCodesUseOnlyThePublishedAlphabet(t *testing.T) {
 	}
 }
 
-// TestCodeCharactersAreUniformlyDistributed is currently expected to fail: see
-// the arithmetic in the failure message. It pins the property codeFor's own
+// TestCodeCharactersAreUniformlyDistributed pins the property codeFor's own
 // comment claims ("rejection sampling so that every character is uniformly
-// distributed").
+// distributed"). The failure message names the arithmetic that should hold, so a
+// hardcoded threshold reintroduced later shows up as a number rather than as a
+// mystery.
 func TestCodeCharactersAreUniformlyDistributed(t *testing.T) {
 	const windows = 20_000
 
@@ -627,14 +628,17 @@ func TestCodeCharactersAreUniformlyDistributed(t *testing.T) {
 	// 29 degrees of freedom: a uniform mapping lands near 29 (sd about 7.6).
 	const maxChiSquare = 120
 	if chiSquare > maxChiSquare {
-		// 248 is 8*31: the largest multiple of 31 below 256, and not a multiple
-		// of this 30-symbol alphabet. Digest bytes 240..247 therefore map onto
-		// symbols 0..7 for a ninth time, making those symbols 9/248 likely and
-		// the other 22 symbols 8/248.
+		// The threshold is derived from the alphabet, so a failure here means the
+		// derivation or the sampling loop changed. State the arithmetic that
+		// should hold rather than the numbers of any one revision: bytes at or
+		// above the threshold are discarded, so a threshold that is not a
+		// multiple of the alphabet length makes the tail symbols more likely.
 		t.Errorf("chi-square = %.1f over %d code characters (threshold %d): the code alphabet is "+
-			"not uniform. codeFor rejects bytes >= 248, but 248 = 8*31 while the alphabet has %d "+
-			"symbols; the largest multiple of %d below 256 is %d.",
-			chiSquare, total, maxChiSquare, len(pairingAlphabet), len(pairingAlphabet), 256/len(pairingAlphabet)*len(pairingAlphabet))
+			"not uniform. codeFor rejects bytes >= %d, and the largest multiple of the %d-symbol "+
+			"alphabet below 256 is %d.",
+			chiSquare, total, maxChiSquare,
+			256/len(pairingAlphabet)*len(pairingAlphabet), len(pairingAlphabet),
+			256/len(pairingAlphabet)*len(pairingAlphabet))
 	}
 }
 

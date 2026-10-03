@@ -87,12 +87,6 @@ type Outcome struct {
 	SpillPath string
 }
 
-// Problem reports whether the result describes something a reader should look
-// at: a non-zero exit, a structured error, or a stop the harness called out.
-func (o Outcome) Problem() bool {
-	return (o.HasExitCode && o.ExitCode != 0) || o.ErrorCode != "" || o.ErrorName != "" || len(o.Notices) > 0
-}
-
 // Facts is an Outcome in the vocabulary of the wire.
 //
 // It is embedded by both the live event payload and the transcript projection,

@@ -577,18 +577,6 @@ body {
   font-size: 0.8rem;
   color: var(--text-muted);
 }
-.row-time {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-.row-sub {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .setting-row {
   display: flex;

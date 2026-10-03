@@ -46,31 +46,3 @@ func Bytes(n int) []byte {
 func Token(n int) string {
 	return hex.EncodeToString(Bytes(n))
 }
-
-// PairingCode returns a short, human-transcribable code drawn from an alphabet
-// with no visually ambiguous characters (no 0/O, 1/I/L). The default length of 8
-// yields ~39 bits, which is only safe because pairing codes are short-lived,
-// single-use, and rate-limited.
-func PairingCode(length int) string {
-	const alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-	out := make([]byte, length)
-	// Rejection sampling keeps the distribution uniform over the alphabet.
-	buf := make([]byte, length*2)
-	for i := 0; i < length; {
-		if _, err := rand.Read(buf); err != nil {
-			panic(fmt.Sprintf("idgen: crypto/rand unavailable: %v", err))
-		}
-		for _, b := range buf {
-			// 256 / 31 leaves the tail biased; reject it.
-			if int(b) >= 31*8 {
-				continue
-			}
-			out[i] = alphabet[int(b)%len(alphabet)]
-			i++
-			if i == length {
-				break
-			}
-		}
-	}
-	return string(out)
-}

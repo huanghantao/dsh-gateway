@@ -48,10 +48,6 @@ const (
 	StateFailed = "failed"
 )
 
-// DefaultQueueDepth is how many prompts may wait behind a running turn when the
-// configuration does not say.
-const DefaultQueueDepth = 4
-
 // Ticket is one admitted prompt, as reported to a client.
 type Ticket struct {
 	// ID identifies this turn within the gateway's lifetime. It is `turnId` on

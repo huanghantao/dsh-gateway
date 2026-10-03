@@ -9,7 +9,6 @@
 package atomicfile
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -53,7 +52,8 @@ func WriteFile(path string, data []byte, perm fs.FileMode) (err error) {
 	if err = os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("atomicfile: rename into place: %w", err)
 	}
-	return syncDir(dir)
+	syncDir(dir)
+	return nil
 }
 
 // WriteFileSecret is WriteFile with 0600 permissions.
@@ -63,18 +63,15 @@ func WriteFileSecret(path string, data []byte) error {
 
 // syncDir fsyncs a directory so the rename itself is durable. Some filesystems
 // and platforms refuse to open a directory for reading; that is not fatal
-// because the data is already in place, so the error is swallowed.
-func syncDir(dir string) error {
+// because the data is already in place, so every failure here is swallowed.
+func syncDir(dir string) {
 	// dir comes from the caller's configuration, never from a request.
 	d, err := os.Open(dir) //nolint:gosec // configuration-derived path
 	if err != nil {
-		return nil //nolint:nilerr // durability best-effort; the rename already succeeded
+		return
 	}
-	// A directory that cannot be closed is not worth failing a completed write
-	// over; the rename that mattered has already succeeded.
+	// A directory that cannot be closed or synced is not worth failing a
+	// completed write over; the rename that mattered has already succeeded.
 	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
-		return nil //nolint:nilerr // see above
-	}
-	return nil
+	_ = d.Sync()
 }

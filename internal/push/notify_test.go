@@ -171,7 +171,7 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 	// is: it asks once when a turn starts, which is the moment the test has to
 	// wait for before advancing, or the two events race each other and the
 	// measured duration is zero.
-	clock := &watchedClock{now: time.Now()}
+	clock := &fixedClock{now: time.Now()}
 	bus := events.New(events.Config{Replay: 64, Queue: 64})
 	notifier, err := push.NewNotifier(push.NotifierOptions{
 		Bus:       bus,
@@ -349,7 +349,7 @@ func longTurnMessage(t *testing.T, includeName bool, state, title string) (strin
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	clock := &watchedClock{now: time.Now()}
+	clock := &fixedClock{now: time.Now()}
 	bus := events.New(events.Config{Replay: 64, Queue: 64})
 	notifier, err := push.NewNotifier(push.NotifierOptions{
 		Bus:                bus,
@@ -391,32 +391,13 @@ func longTurnMessage(t *testing.T, includeName bool, state, title string) (strin
 	return message.Body, message.Title
 }
 
-// watchedClock is a clock that counts its reads, so a test can wait for the
-// notifier to have looked before it changes the time.
-type watchedClock struct {
-	mu    sync.Mutex
-	now   time.Time
-	reads int
+// fixedClock is a clock a test can hold still, so a notification can be dated
+// from a time the test chose rather than from the machine's.
+type fixedClock struct {
+	now time.Time
 }
 
-func (c *watchedClock) Read() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.reads++
-	return c.now
-}
-
-func (c *watchedClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-func (c *watchedClock) Reads() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.reads
-}
+func (c *fixedClock) Read() time.Time { return c.now }
 
 // busFor builds the bus a notifier test publishes to.
 func busFor(t *testing.T) *events.Bus {
@@ -478,7 +459,7 @@ func TestALongTurnIsNotifiedEvenIfTheObserverArrivedLate(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	clock := &watchedClock{now: time.Now()}
+	clock := &fixedClock{now: time.Now()}
 	bus := events.New(events.Config{Replay: 64, Queue: 64})
 	notifier, err := push.NewNotifier(push.NotifierOptions{
 		Bus:       bus,

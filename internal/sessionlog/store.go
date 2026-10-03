@@ -94,7 +94,8 @@ const (
 const sourceSubagentSettled = "subagent-settled"
 
 // Item is one rendered transcript entry.
-type Item struct { // ID is stable across reads, so a client can key a list on it.
+type Item struct {
+	// ID is stable across reads, so a client can key a list on it.
 	ID string `json:"id"`
 	// Seq is the log sequence number, used for paging.
 	Seq int64 `json:"seq"`
@@ -612,12 +613,6 @@ func (s *Store) Transcript(ctx context.Context, sessionID string, before int64, 
 	return page, nil
 }
 
-// Exists reports whether a session log is present for the id.
-func (s *Store) Exists(sessionID string) bool {
-	_, err := s.logPath(sessionID)
-	return err == nil
-}
-
 // Receipt summarises what a session did, from its own log.
 func (s *Store) Receipt(ctx context.Context, sessionID string) (Receipt, error) {
 	items, meta, err := s.Items(ctx, sessionID)
@@ -674,8 +669,12 @@ func (s *Store) Locked(sessionID string) bool {
 // written, reading every projection every second is the difference between
 // noticing a turn immediately and noticing it long after it ended.
 type Log struct {
-	ID      string
-	Path    string
+	// ID is the session the log belongs to.
+	ID string
+	// Path is where the log file lives.
+	Path string
+	// Size and ModTime are what the file says. The list compares them against
+	// what it read last time to decide whether the log is worth re-reading.
 	Size    int64
 	ModTime time.Time
 }

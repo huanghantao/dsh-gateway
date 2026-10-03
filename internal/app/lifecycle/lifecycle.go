@@ -52,7 +52,6 @@ const (
 type Lifecycle struct {
 	state atomic.Value // State
 	bus   *events.Bus
-	busMu sync.Mutex
 	log   *logx.Logger
 	// once guard so the draining frame is published exactly once however many
 	// callers race to be the one that noticed.
@@ -73,9 +72,6 @@ func New(bus *events.Bus, logger *logx.Logger) *Lifecycle {
 // State reports the current state.
 func (l *Lifecycle) State() State {
 	state, _ := l.state.Load().(State)
-	if state == "" {
-		return StateServing
-	}
 	return state
 }
 
@@ -99,8 +95,6 @@ func (l *Lifecycle) Drain(reason Reason) {
 		l.state.Store(StateDraining)
 		text := string(reason)
 		l.log.Info("draining", "reason", text)
-		l.busMu.Lock()
-		defer l.busMu.Unlock()
 		if l.bus == nil {
 			return
 		}
@@ -116,14 +110,6 @@ func (l *Lifecycle) Drain(reason Reason) {
 func ErrDraining() error {
 	return errx.New(errx.KindUnavailable, "gateway_draining",
 		"the gateway is being redeployed and is not accepting new work; retry in a moment")
-}
-
-// Admit reports whether new work may start, and the error to return if not.
-func (l *Lifecycle) Admit() error {
-	if l.Draining() {
-		return ErrDraining()
-	}
-	return nil
 }
 
 // WaitFor polls until busy reports that nothing is in flight, the context is

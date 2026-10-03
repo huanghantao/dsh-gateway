@@ -885,8 +885,6 @@ export function decodeServerEvent(value: unknown): ServerEvent | null {
   const data = field(value, "data");
 
   switch (type) {
-    case "hello":
-      return { ...envelope, type, data: decodeHello(data) };
     case "session.state":
       return { ...envelope, type, data: decodeSessionPatch(data) };
     case "session.message":

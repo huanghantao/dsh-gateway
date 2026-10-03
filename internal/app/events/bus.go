@@ -107,14 +107,8 @@ const (
 	ResyncFellBehind ResyncReason = "events were dropped for a slow client"
 )
 
-// ResyncReasonOf renders a reason for the wire, so an empty value cannot be
-// mistaken for a real one.
-func (r ResyncReason) String() string {
-	if r == "" {
-		return string(ResyncWindowExceeded)
-	}
-	return string(r)
-}
+// String renders the reason as the text the wire carries.
+func (r ResyncReason) String() string { return string(r) }
 
 // Event is one message on the bus and one frame on the wire.
 type Event struct {
@@ -271,10 +265,6 @@ type Resume struct {
 	// event has a strictly greater Seq. It is what the server reports to the
 	// client as the position it actually got, as opposed to the one it asked for.
 	From uint64
-	// Backlog is how many retained events were replayed. It exists for logs: an
-	// operator asking "was that reconnect cheap or enormous" has no other way to
-	// find out.
-	Backlog int
 }
 
 // Resumable reports whether the client's cursor was honoured in full. A false
@@ -355,7 +345,7 @@ func (b *Bus) Subscribe(cursor Cursor, filter func(Event) bool) Resume {
 	for _, e := range pending {
 		sub.ch <- e
 	}
-	return Resume{Subscription: sub, Reason: reason, From: from, Backlog: len(pending)}
+	return Resume{Subscription: sub, Reason: reason, From: from}
 }
 
 // Subscription is one consumer's view of the bus.
@@ -401,7 +391,8 @@ func (s *Subscription) Close() {
 	})
 }
 
-// matches applies the subscription filter.
+// matches applies the subscription filter. A nil filter is a wildcard, which is
+// what the notifier asks for when it wants every event.
 func (s *Subscription) matches(e Event) bool {
 	if s.filter == nil {
 		return true

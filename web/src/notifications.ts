@@ -181,11 +181,6 @@ async function registration(): Promise<ServiceWorkerRegistration | null> {
   return (await navigator.serviceWorker.getRegistration()) ?? null;
 }
 
-/** What the settings screen shows. */
-export async function pushState(): Promise<PushState> {
-  return (await describePush()).state;
-}
-
 /**
  * Subscribes this browser and tells the gateway.
  *

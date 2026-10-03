@@ -15,6 +15,14 @@ tsc exited
 [output truncated; full output: /tmp/dsh-output/9f2c1ab.txt]
 [exit code: 2]`
 
+// problem is what the assertions below mean by "a reader should look at this": a
+// non-zero exit, a structured error, or a stop the harness called out. It lives
+// here rather than on Outcome because nothing on the gateway's own path asks the
+// question — the card decides it from the facts.
+func problem(out Outcome) bool {
+	return (out.HasExitCode && out.ExitCode != 0) || out.ErrorCode != "" || out.ErrorName != "" || len(out.Notices) > 0
+}
+
 func TestObserveRealMarkers(t *testing.T) {
 	out := Observe(realBashTail)
 
@@ -27,8 +35,8 @@ func TestObserveRealMarkers(t *testing.T) {
 	if out.SpillPath != "/tmp/dsh-output/9f2c1ab.txt" {
 		t.Errorf("SpillPath = %q, want the path from the notice", out.SpillPath)
 	}
-	if !out.Problem() {
-		t.Error("Problem() = false, want true for a non-zero exit")
+	if !problem(out) {
+		t.Error("problem() = false, want true for a non-zero exit")
 	}
 }
 
@@ -57,8 +65,8 @@ func TestObserveExitCodes(t *testing.T) {
 			if out.HasExitCode && out.ExitCode != tc.want {
 				t.Fatalf("ExitCode = %d, want %d", out.ExitCode, tc.want)
 			}
-			if out.Problem() != tc.problem {
-				t.Fatalf("Problem() = %v, want %v", out.Problem(), tc.problem)
+			if problem(out) != tc.problem {
+				t.Fatalf("problem() = %v, want %v", problem(out), tc.problem)
 			}
 		})
 	}
@@ -79,8 +87,8 @@ func TestObserveStopMarkers(t *testing.T) {
 		if len(out.Notices) != 1 || out.Notices[0] != tc.want {
 			t.Errorf("Observe(%q).Notices = %q, want [%q]", tc.text, out.Notices, tc.want)
 		}
-		if !out.Problem() {
-			t.Errorf("Observe(%q).Problem() = false, want true", tc.text)
+		if !problem(out) {
+			t.Errorf("Observe(%q).problem() = false, want true", tc.text)
 		}
 	}
 }
@@ -100,8 +108,8 @@ func TestWithError(t *testing.T) {
 	if out.ErrorCode != "FS_NOT_OBSERVED" || out.ErrorName != "FsError" {
 		t.Fatalf("error = %q/%q, want FsError/FS_NOT_OBSERVED", out.ErrorName, out.ErrorCode)
 	}
-	if !out.Problem() {
-		t.Error("Problem() = false, want true for a structured error")
+	if !problem(out) {
+		t.Error("problem() = false, want true for a structured error")
 	}
 }
 

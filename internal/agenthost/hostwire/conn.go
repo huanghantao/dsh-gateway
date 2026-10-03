@@ -64,9 +64,6 @@ type Request struct {
 	answered atomic.Bool
 }
 
-// Notification reports whether this message has no answer.
-func (r *Request) Notification() bool { return r.reply == nil }
-
 // Context is the connection's lifetime. A handler that waits — and
 // `turn.await` and `permission.request` both do — should stop waiting when the
 // caller has gone, because nobody is left to hear the answer.
@@ -117,10 +114,6 @@ type Conn struct {
 	// long-running answer can stop when nobody is left to hear it.
 	connCtx    context.Context
 	connCancel context.CancelFunc
-
-	// onClose runs once when the connection ends, so an owner can react to a
-	// host that went away without polling.
-	onClose func(error)
 
 	// started guards Start, so a connection's reader is launched exactly once.
 	started sync.Once
@@ -199,22 +192,9 @@ func (c *Conn) Err() error {
 	}
 }
 
-// OnClose registers a callback for the end of the connection. It fires exactly
-// once, including when the connection is already closed.
-func (c *Conn) OnClose(fn func(error)) {
-	c.mu.Lock()
-	select {
-	case <-c.closed:
-		c.mu.Unlock()
-		fn(c.Err())
-		return
-	default:
-	}
-	c.onClose = fn
-	c.mu.Unlock()
-}
-
-// Handle registers the handler for a notification name.
+// Handle registers the handler for one command or notification name. A request
+// is answered through it; a notification has no reply, so a handler that returns
+// an error has that error reported to the far side as MethodEvent.
 func (c *Conn) Handle(event string, h Handler) {
 	c.mu.Lock()
 	c.handlers[event] = h
@@ -485,7 +465,6 @@ func (c *Conn) shutdown(cause error) {
 	c.closeErr = cause
 	pending := c.pending
 	c.pending = map[string]chan response{}
-	onClose := c.onClose
 	close(c.closed)
 	c.mu.Unlock()
 
@@ -496,9 +475,6 @@ func (c *Conn) shutdown(cause error) {
 			Code:    "connection_lost",
 			Message: cause.Error(),
 		}}
-	}
-	if onClose != nil {
-		onClose(cause)
 	}
 }
 

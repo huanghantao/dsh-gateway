@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/huanghantao/dsh-gateway/internal/idgen"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 	"github.com/huanghantao/dsh-gateway/internal/reqctx"
 )
@@ -203,7 +202,3 @@ func (l *Logger) rotateLocked() error {
 	}
 	return l.openLocked()
 }
-
-// NewRequestID returns a fresh correlation identifier for background work that
-// no HTTP request triggered, such as a supervisor restart.
-func NewRequestID() string { return idgen.New("req") }

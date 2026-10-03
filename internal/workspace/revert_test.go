@@ -163,7 +163,7 @@ func TestRevertRefusesADeletion(t *testing.T) {
 // TestRevertConfinesItselfToTheAllowlist is the boundary that makes this
 // package safe to have at all.
 func TestRevertConfinesItselfToTheAllowlist(t *testing.T) {
-	reverter, root := newReverter(t)
+	reverter, _ := newReverter(t)
 	outside := filepath.Join(t.TempDir(), "secrets.txt")
 	write(t, outside, "not in the workspace\n")
 
@@ -179,7 +179,6 @@ func TestRevertConfinesItselfToTheAllowlist(t *testing.T) {
 	if got := read(t, outside); got != "not in the workspace\n" {
 		t.Errorf("content = %q, want the file outside the workspace untouched", got)
 	}
-	_ = root
 }
 
 // TestRevertRefusesASymlinkOutOfTheWorkspace is the case a path-prefix check

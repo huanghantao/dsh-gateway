@@ -337,10 +337,6 @@ export type PromptBlock =
   | { readonly type: "text"; readonly text: string }
   | { readonly type: "image"; readonly mimeType: string; readonly data: string };
 
-export interface PromptRequest {
-  readonly blocks: readonly PromptBlock[];
-}
-
 /** The ticket the gateway answers a prompt with. */
 export type PromptResponse = Turn;
 
@@ -474,10 +470,6 @@ export interface Approval {
   readonly requestedAt: string;
   readonly expiresAt: string;
   readonly options: readonly ApprovalOption[];
-}
-
-export interface ApprovalDecision {
-  readonly optionId: string;
 }
 
 export interface ApprovalResolved {
@@ -661,8 +653,6 @@ export type ServerEvent =
   | (EventEnvelope & { readonly type: "snapshot"; readonly data: SnapshotData })
   | (EventEnvelope & { readonly type: "gateway.draining"; readonly data: DrainingData })
   | (EventEnvelope & { readonly type: "resync"; readonly data: ResyncData });
-
-export type ServerEventType = ServerEvent["type"];
 
 /* ------------------------------------------------------------------ changes */
 

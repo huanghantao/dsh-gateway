@@ -25,7 +25,8 @@ type Receipt struct {
 
 	// Messages counts what a conversation shows: prompts and answers.
 	Messages int `json:"messages"`
-	Turns    int `json:"turns"`
+	// Turns counts the turn boundaries the log recorded.
+	Turns int `json:"turns"`
 
 	// Tools is what the agent ran, most used first.
 	Tools []ToolUse `json:"tools,omitempty"`
@@ -102,9 +103,6 @@ func Summarise(items []Item, meta Meta) Receipt {
 		Turns:     meta.TurnCount,
 		StartedAt: meta.CreatedAt,
 		EndedAt:   meta.UpdatedAt,
-	}
-	if receipt.ID == "" {
-		receipt.ID = meta.ID
 	}
 
 	calls := map[string]*ToolUse{}

@@ -129,7 +129,6 @@ func (b *Broker) recordGrant(sessionID, tool, scope, input, decidedBy string) Gr
 	// The id is derived from the scope, so agreeing to the same scope twice
 	// refreshes the existing grant rather than stacking a second identical rule
 	// that a list would show twice.
-	grant.Uses = 0
 	b.grants[grant.ID] = grant
 	b.mu.Unlock()
 

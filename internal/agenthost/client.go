@@ -102,7 +102,6 @@ type Client struct {
 
 	stop     chan struct{}
 	stopOnce sync.Once
-	started  bool
 }
 
 // ErrNotConnected is returned when the gateway asks for work before the host has
@@ -151,9 +150,6 @@ func (c *Client) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.started = true
-	c.mu.Unlock()
 	// The first connection knows nothing, and that is the awkward case rather
 	// than the empty one: the host is the process a redeploy does not replace, so
 	// it may already be holding sessions and running turns this one never saw.
@@ -785,17 +781,6 @@ func (c *Client) Snapshot(ctx context.Context) (hostwire.SnapshotResult, error) 
 	return snap, err
 }
 
-// Status reads the host's liveness without owning the connection.
-func (c *Client) Status(ctx context.Context) (hostwire.StatusResult, error) {
-	conn := c.current()
-	if conn == nil {
-		return hostwire.StatusResult{}, ErrNotConnected
-	}
-	var status hostwire.StatusResult
-	err := conn.Call(ctx, hostwire.MethodStatus, nil, &status)
-	return status, err
-}
-
 // Drain asks the host to stop accepting turns, which is what a deploy does
 // before replacing it.
 func (c *Client) Drain(ctx context.Context, reason string, force bool) (hostwire.StatusResult, error) {
@@ -808,10 +793,6 @@ func (c *Client) Drain(ctx context.Context, reason string, force bool) (hostwire
 		hostwire.DrainParams{Reason: reason, Force: force}, &status)
 	return status, err
 }
-
-// InstanceID names this gateway process, for logs and for the host's own record
-// of who is driving it.
-func (c *Client) InstanceID() string { return c.opts.InstanceID }
 
 /* -------------------------------------------------------------------- timing */
 

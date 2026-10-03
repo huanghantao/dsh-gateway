@@ -375,6 +375,4 @@ type Harness interface {
 var (
 	// ErrNotReady means the child is not in StateReady.
 	ErrNotReady = errors.New("harness: not ready")
-	// ErrSessionNotAttached means the session is not leased in this process.
-	ErrSessionNotAttached = errors.New("harness: session is not attached")
 )

@@ -89,7 +89,6 @@ type Adapter struct {
 
 	stopping sync.Once
 	stopCh   chan struct{}
-	closed   chan struct{}
 }
 
 // New validates options and returns an adapter. Start must be called before any
@@ -129,7 +128,6 @@ func New(opts Options) (*Adapter, error) {
 		sessions:  map[string]harness.Session{},
 		toolCalls: map[string]harness.ToolCall{},
 		stopCh:    make(chan struct{}),
-		closed:    make(chan struct{}),
 	}, nil
 }
 
@@ -502,7 +500,7 @@ func (a *Adapter) ResumeSession(ctx context.Context, sessionID, workspace string
 func (a *Adapter) ReleaseSession(context.Context, string) error {
 	return errx.New(errx.KindUnavailable, "release_unsupported",
 		"this adapter holds its sessions for the life of the process and cannot "+
-			"detach one; the agent host does not call this")
+			"detach one")
 }
 
 // CloseSession ends a session and releases its write lock, which is what lets the
@@ -602,14 +600,6 @@ func (a *Adapter) forget(sessionID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.sessions, sessionID)
-}
-
-// Attached reports whether the adapter currently holds a session's write lock.
-func (a *Adapter) Attached(sessionID string) bool {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	_, ok := a.sessions[sessionID]
-	return ok
 }
 
 // maxRememberedToolCalls bounds the correlation store. A long-lived gateway sees

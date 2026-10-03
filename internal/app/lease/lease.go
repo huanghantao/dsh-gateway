@@ -211,19 +211,6 @@ func (m *Manager) IsLeased(sessionID string) bool {
 	return ok
 }
 
-// IsBusy reports whether a turn is in flight for the session.
-//
-// A turn running in another process is the watcher's business, not the lease's:
-// this answers for sessions the gateway itself is driving.
-func (m *Manager) IsBusy(sessionID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, held := m.leases[sessionID]; !held {
-		return false
-	}
-	return m.busy(sessionID)
-}
-
 // Get returns a lease snapshot.
 func (m *Manager) Get(sessionID string) (Snapshot, bool) {
 	m.mu.Lock()

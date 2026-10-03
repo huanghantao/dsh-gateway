@@ -3,7 +3,6 @@ package sessionlog
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // TestReceiptSumsUpASession is the whole feature in one assertion: a reader asks
@@ -123,7 +122,6 @@ func TestReceiptIgnoresIdleTime(t *testing.T) {
 	if receipt.SpanSeconds < 4*3600 {
 		t.Errorf("span = %d, want the whole life including the idle stretch", receipt.SpanSeconds)
 	}
-	_ = time.Second
 }
 
 func itoa(n int64) string {

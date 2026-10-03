@@ -1,12 +1,10 @@
 // Package logx configures the process-wide structured logger.
 //
 // The gateway logs exclusively through log/slog. Handlers are chosen once in the
-// composition root and injected; packages never reach for a global. Secrets are
-// never logged: see Redact below.
+// composition root and injected; packages never reach for a global.
 package logx
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -67,42 +65,4 @@ func parseLevel(s string) slog.Level {
 // readable; production code must not.
 func Discard() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
-}
-
-// Redact masks a secret so that a correlation-friendly prefix survives without
-// exposing the value. Values shorter than 8 bytes are fully masked.
-func Redact(secret string) string {
-	if len(secret) < 8 {
-		return "***"
-	}
-	return secret[:4] + "…(" + itoa(len(secret)) + "B)"
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
-type ctxKey struct{}
-
-// WithLogger returns a context carrying logger.
-func WithLogger(ctx context.Context, logger *slog.Logger) context.Context {
-	return context.WithValue(ctx, ctxKey{}, logger)
-}
-
-// FromContext returns the context's logger, or defaultLogger when absent.
-func FromContext(ctx context.Context, defaultLogger *slog.Logger) *slog.Logger {
-	if l, ok := ctx.Value(ctxKey{}).(*slog.Logger); ok && l != nil {
-		return l
-	}
-	return defaultLogger
 }

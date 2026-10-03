@@ -199,20 +199,3 @@ export function isolateBackground(keep: readonly Element[]): () => void {
   };
 }
 
-/* ----------------------------------------------------------------- markup */
-
-/**
- * Renders a JSON-encoded string (tool inputs and outputs arrive this way) for
- * display. Falls back to the raw text so a non-JSON payload is still visible
- * rather than silently swallowed.
- */
-export function prettyJson(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed === "") return "";
-  if (trimmed[0] !== "{" && trimmed[0] !== "[") return raw;
-  try {
-    return JSON.stringify(JSON.parse(trimmed) as unknown, null, 2);
-  } catch {
-    return raw;
-  }
-}

@@ -106,16 +106,6 @@ func (p *process) Wait() error {
 	return p.waitErr
 }
 
-// Closed reports whether the child has already exited.
-func (p *process) Closed() bool {
-	select {
-	case <-p.waited:
-		return true
-	default:
-		return false
-	}
-}
-
 // Stop closes stdin, which DSH treats as the supported shutdown signal, then
 // waits up to grace for a clean exit before killing the process.
 //
