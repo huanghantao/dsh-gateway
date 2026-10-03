@@ -12,7 +12,7 @@
  * a future edit forgets why that check is there.
  */
 
-import { copyText } from "./clipboard.js";
+import { copyButton } from "./copybutton.js";
 import { el } from "./dom.js";
 
 const FENCE = /^```(.*)$/;
@@ -140,26 +140,11 @@ function renderInline(target: Node, text: string): void {
   flushLiteral();
 }
 
-const COPIED_LABEL_MS = 1200;
-
 function codeBlock(lang: string, code: string): HTMLElement {
   const bar = el("div", { class: "md-code-bar" }, el("span", { class: "md-lang", text: lang === "" ? "code" : lang }));
-
   // Always offered: the fallback in `copyText` is what makes this work over
   // plain HTTP, where `navigator.clipboard` does not exist at all.
-  const button = el("button", { class: "md-copy", attrs: { type: "button" }, text: "Copy" });
-  let reset = 0;
-  button.addEventListener("click", () => {
-    void copyText(code).then((copied) => {
-      button.textContent = copied ? "Copied" : "Copy failed";
-      window.clearTimeout(reset);
-      reset = window.setTimeout(() => {
-        button.textContent = "Copy";
-      }, COPIED_LABEL_MS);
-    });
-  });
-  bar.appendChild(button);
-
+  bar.appendChild(copyButton(code, "md-copy"));
   return el("div", { class: "md-block" }, bar, el("pre", { class: "md-pre" }, el("code", { text: code })));
 }
 

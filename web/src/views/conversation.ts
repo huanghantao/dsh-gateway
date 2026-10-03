@@ -3,15 +3,17 @@
  *
  * Four decisions shape this file:
  *
- * 1. **Append, do not rebuild.** A turn emits a frame per tool and per message.
- *    The log keeps the nodes it already rendered and appends only the rows whose
- *    keys are new, so a hundred-frame turn costs a hundred appends rather than a
- *    hundred full re-renders. Prepending history ("load older") or replacing the
- *    feed after `resync` changes the key prefix, which falls back to a full
- *    rebuild — correct, and rare.
+ * 1. **Rows are reconciled, not rebuilt.** A turn emits a frame per tool and per
+ *    message, and a tool call changes *in place* when its result lands. The log
+ *    keeps the nodes it already rendered, updates the rows whose data object was
+ *    replaced, and appends the rest — so a hundred-frame turn costs a hundred
+ *    appends, and a card that was published as running becomes the card that
+ *    shows its output. `rows.ts` owns that walk; this file owns what a row means.
  * 2. **Scroll follows the reader, not the stream.** If the reader has scrolled up
  *    to read something, a new message must not yank them to the bottom. The
- *    "was at the bottom" test happens before the DOM changes.
+ *    "was at the bottom" test happens before the DOM changes, and history that
+ *    arrives *above* the reader moves their offset by the height it added
+ *    instead of throwing their place away.
  * 3. **The lease is surfaced, not hidden — but not at the cost of the screen.**
  *    While this screen holds the session, the desktop cannot open it, and that
  *    is a real cost of using the phone. It is also a cost that lasts for the
@@ -28,14 +30,17 @@
  */
 
 import type { Ctx, OutgoingImage } from "../actions.js";
-import { el, on, pinAboveKeyboard, prettyJson, scrollToEnd } from "../dom.js";
-import { formatTokens, modelLabel, relativeTime, shortWorkspace, utf8Length } from "../format.js";
-import { renderMarkdown } from "../markdown.js";
-import { describeTool, toolDetail } from "../toolinfo.js";
+import { el, on, pinAboveKeyboard, scrollToEnd } from "../dom.js";
+import { feedRows, type FeedRow } from "../feed.js";
+import { formatTokens, modelLabel, shortWorkspace, utf8Length } from "../format.js";
+import { RowList } from "../rows.js";
+import { formatElapsed } from "../tools/card.js";
+import { toolHeadline } from "../tools/present.js";
+import { mountFeedRow } from "./feedrows.js";
 import { openChangesSheet } from "./changes.js";
 import { openSheet, type Sheet } from "./ui.js";
 import type { ActiveSession, AppStore } from "../store.js";
-import type { FeedItem, HarnessStateData, Session, TokenUsage, Turn } from "../types.js";
+import type { FeedItem, HarnessStateData, Session, Turn } from "../types.js";
 
 /**
  * The composer's fallback bound, used only until `GET /me` answers.
@@ -197,20 +202,6 @@ async function prepareImage(file: File): Promise<PendingImage> {
   }
 }
 
-/**
- * A duration as a reader says it: `12s`, `1m 04s`, `1h 02m`.
- *
- * Minutes and seconds are zero-padded so the figure does not change width as it
- * ticks; a status line that jitters once a second is a status line that pulls
- * the eye every second.
- */
-function formatElapsed(seconds: number): string {
-  const total = Math.max(0, Math.floor(seconds));
-  if (total < 60) return `${total}s`;
-  if (total < 3600) return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, "0")}s`;
-  return `${Math.floor(total / 3600)}h ${String(Math.floor((total % 3600) / 60)).padStart(2, "0")}m`;
-}
-
 /** A byte count the way this file's counter already writes them. */
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) {
@@ -218,126 +209,6 @@ function formatBytes(bytes: number): string {
     return `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB`;
   }
   return `${Math.max(1, Math.round(bytes / 1024))} KiB`;
-}
-
-/* ------------------------------------------------------------------ rows */
-
-function messageRow(item: Extract<FeedItem, { kind: "message" }>): HTMLElement {
-  const article = el("article", { class: `msg msg-${item.role}` });
-
-  const head = el(
-    "header",
-    { class: "msg-head" },
-    el("span", { class: "msg-role", text: item.role === "user" ? "You" : "Assistant" }),
-  );
-  if (item.time !== null) {
-    head.appendChild(el("time", { class: "msg-time", attrs: { datetime: item.time }, text: relativeTime(item.time) }));
-  }
-  if (item.role === "assistant" && item.model !== null) {
-    head.appendChild(el("span", { class: "msg-model", text: item.model }));
-  }
-  article.appendChild(head);
-
-  if (item.thinking !== null && item.thinking.trim() !== "") {
-    article.appendChild(
-      el(
-        "details",
-        { class: "thinking" },
-        el("summary", { class: "thinking-summary", text: "Thinking" }),
-        el("div", { class: "thinking-body" }, renderMarkdown(item.thinking)),
-      ),
-    );
-  }
-
-  const body = el("div", { class: "msg-body" });
-  if (item.role === "user") {
-    // User text is never markdown: it is what they typed, shown verbatim.
-    body.appendChild(el("p", { class: "msg-plain", text: item.text }));
-  } else {
-    body.appendChild(renderMarkdown(item.text));
-  }
-  article.appendChild(body);
-
-  if (item.usage !== null) {
-    article.appendChild(usageLine(item.usage));
-  }
-  return article;
-}
-
-function usageLine(usage: TokenUsage): HTMLElement {
-  const parts = [`${formatTokens(usage.inputTokens)} in`, `${formatTokens(usage.outputTokens)} out`];
-  if (usage.totalTokens !== null) parts.push(`${formatTokens(usage.totalTokens)} total`);
-  if (usage.contextWindow !== null) parts.push(`of ${formatTokens(usage.contextWindow)}`);
-  return el("p", { class: "usage", text: parts.join(" · ") });
-}
-
-function toolRow(item: Extract<FeedItem, { kind: "tool" }>, workspace: string): HTMLElement {
-  // What the call is doing, not just which tool it is: a path for an edit, the
-  // agent's own description for a command. Empty for a tool with nothing worth
-  // saying, in which case the card is the name and the status as before.
-  const detail = toolDetail(item.tool, item.input, workspace);
-  const summary = el(
-    "summary",
-    { class: "tool-summary" },
-    el("span", { class: "tool-name", text: item.tool }),
-    detail === "" ? null : el("span", { class: "tool-detail", text: detail }),
-    el("span", {
-      class: `tool-status tool-status-${item.open ? "running" : item.isError ? "error" : "ok"}`,
-      text: item.open ? "running" : item.isError ? "failed" : "done",
-    }),
-  );
-
-  const body = el("div", { class: "tool-body" });
-  if (item.input !== null && item.input !== "") {
-    body.appendChild(el("h3", { class: "tool-label", text: "Input" }));
-    body.appendChild(el("pre", { class: "tool-pre", text: prettyJson(item.input) }));
-  }
-  if (item.output !== null && item.output !== "") {
-    body.appendChild(el("h3", { class: "tool-label", text: "Output" }));
-    body.appendChild(el("pre", { class: "tool-pre", text: item.output }));
-  }
-  if (item.output === null && !item.open) {
-    body.appendChild(el("p", { class: "muted", text: "No output was recorded for this call." }));
-  }
-
-  const details = el(
-    "details",
-    { class: `tool tool-${item.isError ? "error" : item.open ? "running" : "ok"}` },
-    summary,
-    body,
-  );
-  // A running card is open so the reader can watch progress; a finished one is
-  // collapsed so a long turn stays scannable. `<details open>` is an attribute,
-  // not a style, so it is unaffected by the CSP.
-  if (item.open) details.setAttribute("open", "");
-  return details;
-}
-
-function noticeRow(item: Extract<FeedItem, { kind: "notice" }>): HTMLElement {
-  return el(
-    "p",
-    { class: "notice" },
-    item.time === null ? null : el("time", { class: "notice-time", attrs: { datetime: item.time }, text: relativeTime(item.time) }),
-    item.text,
-  );
-}
-
-function rowFor(item: FeedItem, workspace: string): HTMLElement {
-  switch (item.kind) {
-    case "message":
-      return messageRow(item);
-    case "tool":
-      return toolRow(item, workspace);
-    case "notice":
-      return noticeRow(item);
-  }
-}
-
-function commonPrefixLength(a: readonly FeedItem[], b: readonly FeedItem[]): number {
-  const limit = Math.min(a.length, b.length);
-  let index = 0;
-  while (index < limit && a[index]?.key === b[index]?.key) index += 1;
-  return index;
 }
 
 /* ---------------------------------------------------------------- banners */
@@ -440,11 +311,26 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     text: "\u00b1",
   });
 
+  /**
+   * Fold or unfold every run of tool calls at once.
+   *
+   * The run headers already fold one stretch each, which is what a reader
+   * usually wants. This is for the other case: a turn of forty calls scrolled
+   * past twice, where "get the cards out of the way" should be one tap rather
+   * than one per run. It reports what it will do next, not what it did last.
+   */
+  const toolsChip = el("button", {
+    class: "btn btn-ghost btn-icon tools-chip",
+    attrs: { type: "button", "aria-label": "Hide tool calls", hidden: "" },
+    text: "\u25be",
+  });
+
   const head = el(
     "header",
     { class: "conv-head" },
     back,
     el("div", { class: "conv-head-main" }, title, subtitle),
+    toolsChip,
     changesChip,
     leaseChip,
   );
@@ -530,7 +416,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
   const view = el("section", { class: "view view-conversation" }, head, banners, olderWrap, log, turnStatus, composerWrap);
   root.appendChild(view);
 
-  let rendered: readonly FeedItem[] = [];
+  let rowCache: readonly FeedRow[] = [];
   let activeSnapshot: ActiveSession | null = null;
   /** What the composer is holding, in the order it was picked. */
   let attached: readonly Attachment[] = [];
@@ -540,38 +426,69 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
   let ticker = 0;
   /** Identity of the queue strip's contents, so an unchanged queue is not rebuilt. */
   let queueKey: string | null = null;
+  /**
+   * Runs the reader has folded shut, by run key.
+   *
+   * View state, not feed state: it survives every frame that only moved the
+   * feed, and is discarded when the screen is left — a fold is a decision about
+   * reading this turn, not a setting.
+   */
+  const collapsedRuns = new Set<string>();
+  const rows = new RowList<FeedRow>(log, {
+    key: (row) => row.key,
+    mount: (row) =>
+      mountFeedRow(row, {
+        toggleRun: (runKey) => {
+          if (collapsedRuns.has(runKey)) collapsedRuns.delete(runKey);
+          else collapsedRuns.add(runKey);
+          renderRows(store.state.active?.feed ?? []);
+        },
+      }),
+  });
 
   /**
    * The session's root, used to shorten the paths in tool summaries. Read at
    * render time rather than captured, because the header's session arrives a
-   * moment after the feed does.
+   * moment after the feed does — and passed into the row model, so a workspace
+   * that arrives late rebuilds the rows that name a path.
    */
   const workspace = (): string => store.state.active?.session?.workspace ?? "";
 
   const atBottom = (): boolean => log.scrollTop + log.clientHeight >= log.scrollHeight - NEAR_BOTTOM_PX;
 
-  /** Replaces the whole log; used on first paint, `resync` and "load older". */
-  const rebuildLog = (feed: readonly FeedItem[]): void => {
+  /**
+   * Reconciles the log against the feed.
+   *
+   * Two things happen around the reconciliation. If the reader was at the end,
+   * they stay at the end: a new frame must not scroll away from someone reading
+   * history, and must not leave someone who is watching the turn behind either.
+   * If they were not, and rows appeared *above* them, their offset is moved by
+   * the height that was inserted — otherwise "load older" throws away the place
+   * they were reading, which is the one thing that button must not do.
+   */
+  const renderRows = (feed: readonly FeedItem[]): void => {
     const stick = atBottom();
-    log.replaceChildren(...feed.map((item) => rowFor(item, workspace())));
-    rendered = feed;
-    if (stick) scrollToEnd(log);
-  };
-
-  const syncLog = (feed: readonly FeedItem[]): void => {
-    const common = commonPrefixLength(rendered, feed);
-    if (common === 0 && rendered.length > 0 && feed.length > 0) {
-      rebuildLog(feed);
+    const heightBefore = log.scrollHeight;
+    const topBefore = log.scrollTop;
+    const next = feedRows(feed, rowCache, { workspace: workspace(), collapsedRuns });
+    const change = rows.set(next);
+    rowCache = next;
+    syncToolsChip();
+    if (!change.changed) return;
+    if (stick) {
+      scrollToEnd(log);
       return;
     }
-    const stick = atBottom();
-    while (log.childElementCount > common) log.lastElementChild?.remove();
-    for (let index = common; index < feed.length; index += 1) {
-      const item = feed[index];
-      if (item !== undefined) log.appendChild(rowFor(item, workspace()));
-    }
-    rendered = feed;
-    if (stick) scrollToEnd(log);
+    if (change.prepended) log.scrollTop = topBefore + (log.scrollHeight - heightBefore);
+  };
+
+  /** The chip's label and its hidden state, both derived from the rows. */
+  const syncToolsChip = (): void => {
+    const runs = rowCache.filter((row) => row.kind === "toolrun");
+    toolsChip.hidden = runs.length === 0;
+    const anyOpen = runs.some((row) => row.kind === "toolrun" && !row.collapsed);
+    toolsChip.textContent = anyOpen ? "\u25be" : "\u25b8";
+    toolsChip.setAttribute("aria-label", anyOpen ? "Hide tool calls" : "Show tool calls");
   };
 
   /* ------------------------------------------------------------ composer */
@@ -868,6 +785,17 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     if (files.length > 0) void addImages(files);
   });
 
+  const offTools = on(toolsChip, "click", () => {
+    const runs = rowCache.filter((row) => row.kind === "toolrun");
+    const anyOpen = runs.some((row) => row.kind === "toolrun" && !row.collapsed);
+    for (const row of runs) {
+      if (row.kind !== "toolrun") continue;
+      if (anyOpen) collapsedRuns.add(row.runKey);
+      else collapsedRuns.delete(row.runKey);
+    }
+    renderRows(store.state.active?.feed ?? []);
+  });
+
   const offChanges = on(changesChip, "click", () => {
     const session = store.state.active?.session ?? null;
     if (session !== null) openChangesSheet(ctx, session);
@@ -1000,7 +928,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     for (let index = feed.length - 1; index >= 0; index -= 1) {
       const item = feed[index];
       if (item === undefined || item.kind !== "tool" || !item.open) continue;
-      const headline = describeTool(item.tool, item.input, workspace()).headline;
+      const headline = toolHeadline(item.tool, item.input, workspace());
       return headline === "" ? item.tool : `${item.tool} · ${headline}`;
     }
     return "";
@@ -1036,6 +964,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
   const syncTicker = (ticking: boolean): void => {
     if (!ticking) {
       stopTicker();
+    rows.clear();
       return;
     }
     if (ticker === 0) ticker = window.setInterval(() => renderStatus(activeSnapshot), TICK_MS);
@@ -1115,7 +1044,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
       return;
     }
 
-    if (active.feed !== rendered) syncLog(active.feed);
+    renderRows(active.feed);
 
     loadOlder.hidden = active.nextBefore === null;
     loadOlder.disabled = active.loadingOlder;
@@ -1175,9 +1104,11 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     offSubmit();
     offAttach();
     offPicked();
+    offTools();
     offChanges();
     offLease();
     stopTicker();
+    rows.clear();
     leaseSheet?.sheet.close();
     unpin();
     view.remove();

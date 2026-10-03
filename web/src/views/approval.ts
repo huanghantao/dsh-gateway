@@ -27,7 +27,8 @@
 import type { Ctx } from "../actions.js";
 import { el, isolateBackground, trapFocus } from "../dom.js";
 import { formatCountdown } from "../format.js";
-import { describeTool, type ToolChange } from "../toolinfo.js";
+import { changeOf, diffBlock } from "../tools/diff.js";
+import { looksDestructive } from "../tools/risk.js";
 import type { Approval, ApprovalOption } from "../types.js";
 
 /** Mirrors the contract's documented options; used only if the server omits them. */
@@ -51,75 +52,6 @@ function optionClass(option: ApprovalOption): string {
   if (option.id.startsWith("allow")) return "btn btn-primary";
   if (option.id.startsWith("reject") || option.id.startsWith("deny")) return "btn btn-danger";
   return "btn btn-ghost";
-}
-
-/* -------------------------------------------------------------------- diff */
-
-/** `+14 −2`, or "" when the change added and removed nothing. */
-function diffStat(added: number, deleted: number): string {
-  const parts: string[] = [];
-  if (added > 0) parts.push(`+${added}`);
-  if (deleted > 0) parts.push(`−${deleted}`);
-  return parts.join(" ");
-}
-
-/**
- * One line of a change.
- *
- * The leading sign is markup rather than the line's text: the class carries it
- * for the stylesheet, and an aria-hidden span carries it for the eye, so the
- * spoken text does not begin with a sign on every single line. What the change
- * amounts to is said once, on the block.
- */
-function diffLine(line: string): HTMLElement {
-  const sign = line.slice(0, 1);
-  const kind = sign === "+" ? "diff-add" : sign === "-" ? "diff-del" : "diff-ctx";
-  return el(
-    "div",
-    { class: `diff-line ${kind}` },
-    el("span", { attrs: { "aria-hidden": "true" }, text: sign === "" ? " " : sign }),
-    line.slice(1),
-  );
-}
-
-/** The change in words, for a reader the colours do not reach. */
-function diffLabel(change: ToolChange): string {
-  const parts = [`Change to ${change.display}`];
-  if (change.added > 0) parts.push(`${change.added} added`);
-  if (change.deleted > 0) parts.push(`${change.deleted} removed`);
-  if (change.wholeFile) parts.push("the previous contents are not recorded");
-  if (change.truncated) parts.push("it is shown cut short");
-  return `${parts.join(", ")}.`;
-}
-
-/** What the diff does not show, said plainly rather than left to be assumed. */
-function diffNote(change: ToolChange): string {
-  const notes: string[] = [];
-  if (change.wholeFile) {
-    notes.push("The log does not record what this file held before, so only the new contents are shown.");
-  }
-  if (change.truncated) {
-    notes.push("This change was cut short to keep it renderable; more of the file changed than is shown here.");
-  }
-  return notes.join(" ");
-}
-
-/** The changed file: a caption, its lines, and a note when the diff is partial. */
-function diffBlock(change: ToolChange): readonly Node[] {
-  const stat = diffStat(change.added, change.deleted);
-  const head = el("p", {
-    class: "diff-head",
-    text: stat === "" ? change.display : `${change.display} · ${stat}`,
-  });
-  const lines = el("div", { class: "diff", attrs: { role: "group", "aria-label": diffLabel(change) } });
-  for (const line of change.lines) lines.appendChild(diffLine(line));
-
-  const nodes: Node[] = [head, lines];
-  const note = diffNote(change);
-  // Beside the block, not inside it: a note below a scrolling diff is a note a
-  // reader who never scrolls to the end never sees.
-  if (note !== "") nodes.push(el("p", { class: "diff-note", text: note }));
-  return nodes;
 }
 
 /** The arguments as they arrived. Never reformatted — this is the bytes being judged. */
@@ -196,7 +128,8 @@ function buildCard(approval: Approval, queued: number, ctx: Ctx): ApprovalCard {
   // hidden rather than faked.
   const totalWindow = Number.isNaN(expiresAt) ? Number.NaN : Math.max(1, expiresAt - (Number.isNaN(requestedAt) ? expiresAt - 1 : requestedAt));
 
-  const { change, risk } = describeTool(approval.tool, approval.input, workspaceFor(approval, ctx));
+  const change = changeOf(approval.tool, approval.input, workspaceFor(approval, ctx));
+  const risk = looksDestructive(approval.tool, approval.input);
   // A change with no lines to draw is not a diff — an empty whole-file write
   // would be a blank box that says nothing — so it falls back to the bytes.
   const shown = change !== null && change.lines.length > 0 ? change : null;

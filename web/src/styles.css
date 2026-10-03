@@ -915,16 +915,6 @@ body {
   color: var(--text-muted);
   text-transform: lowercase;
 }
-.md-copy {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-sunken);
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 0.72rem;
-}
 .md-pre {
   margin: 0;
   padding: 10px;
@@ -950,6 +940,30 @@ body {
 }
 .tool-running {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.tool-warn {
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+}
+/*
+ * The disclosure marker.
+ *
+ * A `<summary>` is a flex row here, which is what removes the user agent's
+ * triangle — so a card looked like a static row and the only sign it could be
+ * opened was the status word at the end. This draws it back: a small triangle
+ * that points at the content when the card is shut and down when it is open.
+ */
+.tool-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--text-muted);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 120ms ease;
+}
+.tool[open] > .tool-summary .tool-caret,
+.tool-run-head[aria-expanded="true"] .tool-caret {
+  transform: rotate(90deg);
 }
 .tool-summary {
   display: flex;
@@ -984,6 +998,16 @@ body {
   font-size: 0.76rem;
   color: var(--text-muted);
 }
+/*
+ * How long a call took, or has been going. Monospace so the number does not
+ * change width as it ticks, and muted because it is context rather than news.
+ */
+.tool-meta {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
 .tool-status {
   font-family: var(--sans);
   font-size: 0.7rem;
@@ -1001,8 +1025,28 @@ body {
 .tool-status-error {
   color: var(--danger);
 }
+/*
+ * A command that exited non-zero is neither "done" nor a failed tool call: DSH
+ * reports the status and leaves the judgement to the reader, so the card states
+ * the fact and takes the warning colour rather than the error one.
+ */
+.tool-status-warn {
+  color: var(--warn);
+}
+/*
+ * The body is the card's one scroll container.
+ *
+ * It used to be each `<pre>`, which on a phone meant a card could hold three
+ * nested scrollers and a thumb could not tell which one it had caught. One
+ * bounded body scrolls the command, the output, the facts and the raw arguments
+ * together, and `overscroll-behavior` keeps a flick at the end of it from
+ * carrying the conversation behind it.
+ */
 .tool-body {
   padding: 0 12px 12px;
+  max-height: 60dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .tool-label {
   margin: 8px 0 4px;
@@ -1014,18 +1058,162 @@ body {
 }
 .tool-pre {
   margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
+  padding: 10px;
   font-family: var(--mono);
   font-size: 0.78rem;
   line-height: 1.45;
-  overflow-x: auto;
-  max-height: 45dvh;
-  overflow-y: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* One labelled block inside a card: a bar, and the content under it. */
+.tool-block {
+  margin: 0 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.tool-block-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+}
+.tool-block-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+/* A prompt that was only pictures still has to look like a message. */
+.msg-attachments {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.tool-text {
+  margin: 0;
+  padding: 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-diff {
+  margin: 0 0 8px;
+}
+/*
+ * A diff inside a card keeps its horizontal scroll — a wrapped diff line loses
+ * the alignment that makes it a diff — but gives up its own vertical one: the
+ * body already scrolls, and two vertical scrollers in one card is the nested
+ * scrolling a thumb cannot navigate.
+ */
+.tool-body .diff {
+  max-height: none;
+}
+
+/* The shared copy control: a tool's command, its output, a code block. */
+.copy-btn {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+/* The facts a result reported: an exit status, a harness error. */
+.tool-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 8px 0 0;
+  font-size: 0.74rem;
+}
+.tool-facts dt {
+  color: var(--text-muted);
+}
+.tool-facts dd {
+  margin: 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+/* What the card is not showing, said in words. */
+.tool-note {
+  margin: 8px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+.tool-note.is-warn {
+  color: var(--warn);
+}
+
+.tool-raw {
+  margin-top: 8px;
+}
+.tool-raw-summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.tool-raw > .tool-pre {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+/*
+ * The header over a run of tool calls.
+ *
+ * A dozen calls between two sentences is a wall on a phone; this turns it into
+ * one line that says how many, how many went wrong and how long they took, and
+ * folds the cards away when the reader wants the answer underneath.
+ */
+.tool-run {
+  display: flex;
+}
+.tool-run-head {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.tool-run-head.is-bad {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn);
+}
+.tool-run-title {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+.tool-run-problems {
+  font-family: var(--sans);
+}
+.tool-run-time {
+  margin-left: auto;
+  font-family: var(--mono);
 }
 
 .notice {

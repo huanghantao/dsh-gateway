@@ -42,6 +42,8 @@ import type {
   TokenUsage,
   ToolData,
   ToolPhase,
+  ToolResultFacts,
+  ToolTrim,
   TranscriptItem,
   TranscriptResponse,
   ReceiptTool,
@@ -460,6 +462,28 @@ function decodeUsage(value: unknown): TokenUsage | null {
 
 const TRANSCRIPT_ROLES: readonly TranscriptRole[] = ["user", "assistant", "tool", "notice"];
 
+/**
+ * Reads the facts a recorded result carries.
+ *
+ * They are shared verbatim by a transcript item and a `session.tool` frame —
+ * `toolresult.Facts` on the server is one definition — so they are read here
+ * once rather than twice.
+ */
+function decodeResultFacts(source: Record<string, unknown>): ToolResultFacts & ToolTrim {
+  return {
+    // A missing exit code is silence, not zero: the contract omits the field
+    // when the result never said, and zero is a real status that means success.
+    exitCode: asNumberOrNull(field(source, "exitCode")),
+    errorName: asStringOrNull(field(source, "errorName")),
+    errorCode: asStringOrNull(field(source, "errorCode")),
+    notices: asArray(field(source, "notices")).filter((item): item is string => typeof item === "string"),
+    harnessTruncated: asBoolean(field(source, "harnessTruncated"), false),
+    spillPath: asStringOrNull(field(source, "spillPath")),
+    inputTruncated: asBoolean(field(source, "inputTruncated"), false),
+    outputTruncated: asBoolean(field(source, "outputTruncated"), false),
+  };
+}
+
 function decodeTranscriptItem(value: unknown): TranscriptItem | null {
   if (!isRecord(value)) return null;
   const role = asEnum(field(value, "role"), TRANSCRIPT_ROLES, "notice");
@@ -480,7 +504,11 @@ function decodeTranscriptItem(value: unknown): TranscriptItem | null {
     toolInput: asStringOrNull(field(value, "input")),
     toolOutput: asStringOrNull(field(value, "output")),
     isError: asBoolean(field(value, "isError"), false),
+    // A call the log holds without a result is running right now.
+    pending: asBoolean(field(value, "pending"), false),
+    endedAt: asStringOrNull(field(value, "endedAt")),
     attachments: asNumber(field(value, "attachments"), 0),
+    ...decodeResultFacts(value),
   };
 }
 
@@ -730,6 +758,9 @@ function decodeMessage(value: unknown): MessageData {
     thinking: asStringOrNull(field(source, "thinking")),
     model: asStringOrNull(field(source, "model")),
     usage: decodeUsage(field(source, "usage")),
+    // A prompt that was only a screenshot has no text at all; the count is what
+    // keeps its row from rendering as an empty bubble.
+    attachments: asNumber(field(source, "attachments"), 0),
   };
 }
 
@@ -744,6 +775,7 @@ function decodeTool(value: unknown): ToolData {
     input: asStringOrNull(field(source, "input")),
     output: asStringOrNull(field(source, "output")),
     isError: asBoolean(field(source, "isError"), false),
+    ...decodeResultFacts(source),
   };
 }
 

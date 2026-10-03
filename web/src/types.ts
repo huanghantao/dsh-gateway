@@ -348,7 +348,34 @@ export type PromptResponse = Turn;
 
 export type TranscriptRole = "user" | "assistant" | "tool" | "notice";
 
-export interface TranscriptItem {
+/**
+ * What a recorded result says about how a call ended.
+ *
+ * These are the harness's own facts, carried verbatim from the session log or
+ * the ACP stream, and they exist because `isError` is not the question a reader
+ * is asking: DSH reports a command's non-zero exit rather than erroring, so a
+ * command that failed is recorded as a success. See `toolresult` on the server.
+ */
+export interface ToolResultFacts {
+  /** Absent when the result did not say; zero is a real exit status. */
+  readonly exitCode: number | null;
+  /** DSH's structured error, from the session log only. */
+  readonly errorName: string | null;
+  readonly errorCode: string | null;
+  /** The harness's own stop markers, verbatim: a timeout, a signal, a denial. */
+  readonly notices: readonly string[];
+  /** The harness cut the output itself, and where it put the rest. */
+  readonly harnessTruncated: boolean;
+  readonly spillPath: string | null;
+}
+
+/** Which of a call's payloads the deployment bounded on the way to this phone. */
+export interface ToolTrim {
+  readonly inputTruncated: boolean;
+  readonly outputTruncated: boolean;
+}
+
+export interface TranscriptItem extends ToolResultFacts, ToolTrim {
   readonly id: string;
   readonly seq: number;
   readonly time: string;
@@ -363,6 +390,14 @@ export interface TranscriptItem {
   readonly toolInput: string | null;
   readonly toolOutput: string | null;
   readonly isError: boolean;
+  /**
+   * role === "tool" only, and true while the log holds a call and no result: a
+   * phone opening a session mid-turn sees the call that is running. Without it
+   * such a row would render as a finished card with no output.
+   */
+  readonly pending: boolean;
+  /** role === "tool" only: when the result was recorded, so a duration exists. */
+  readonly endedAt: string | null;
   /**
    * How many non-text blocks the message carried. The image itself is not in
    * the projection — see the contract — so a row shows that something was
@@ -488,11 +523,19 @@ export interface MessageData {
   readonly thinking: string | null;
   readonly model: string | null;
   readonly usage: TokenUsage | null;
+  /**
+   * How many non-text blocks the message carried. See TranscriptItem.attachments.
+   *
+   * A prompt this gateway echoed back carries the count too: it is the only
+   * thing that makes an image-only prompt visible before the log commits it.
+   */
+  readonly attachments: number;
 }
 
 export type ToolPhase = "start" | "end";
 
-export interface ToolData {
+/** The `session.tool` payload: one lifecycle frame for one call. */
+export interface ToolData extends ToolResultFacts, ToolTrim {
   readonly phase: ToolPhase;
   readonly tool: string;
   readonly callId: string;
@@ -667,6 +710,10 @@ export type Readiness = "ready" | "starting" | "down";
 /**
  * One rendered row of the conversation. History and live events are folded into
  * the same list so a view never has to know which source a row came from.
+ *
+ * A tool row is the only one that changes after it is rendered — it is published
+ * when the call starts and completed when the result lands — so it is also the
+ * only one whose fields are replaced rather than added to.
  */
 export type FeedItem =
   | {
@@ -684,13 +731,25 @@ export type FeedItem =
   | {
       readonly key: string;
       readonly kind: "tool";
+      /** When the call started, from whichever source first reported it. */
       readonly time: string | null;
+      /** When the result landed. Null while the call is still running. */
+      readonly endedAt: string | null;
       readonly tool: string;
       readonly callId: string;
       readonly input: string | null;
       readonly output: string | null;
+      /** The call has been reported and not yet settled. */
       readonly open: boolean;
       readonly isError: boolean;
+      readonly exitCode: number | null;
+      readonly errorName: string | null;
+      readonly errorCode: string | null;
+      readonly notices: readonly string[];
+      readonly inputTruncated: boolean;
+      readonly outputTruncated: boolean;
+      readonly harnessTruncated: boolean;
+      readonly spillPath: string | null;
     }
   | {
       readonly key: string;
@@ -698,3 +757,7 @@ export type FeedItem =
       readonly time: string | null;
       readonly text: string;
     };
+
+export type FeedMessageItem = Extract<FeedItem, { kind: "message" }>;
+export type FeedToolItem = Extract<FeedItem, { kind: "tool" }>;
+export type FeedNoticeItem = Extract<FeedItem, { kind: "notice" }>;

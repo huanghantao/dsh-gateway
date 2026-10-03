@@ -64,16 +64,26 @@ web/
     store.ts            the reactive store + the app state shape
     decode.ts           runtime narrowing for everything off the wire
     types.ts            hand-written mirror of docs/api.md
-    feed.ts             folds transcript pages and live frames into one list
+    feed.ts             folds transcript pages and live frames into one list,
+                        and turns that list into rows (grouping runs of tools)
+    rows.ts             keyed row reconciler: mounts once, updates in place
+    copybutton.ts       the copy control, shared by code blocks and tool cards
     markdown.ts         small safe Markdown renderer (builds DOM nodes)
     clipboard.ts        copy, with a fallback for origins without the API
     dom.ts              DOM builder, focus trap, keyboard/scroll helpers
     format.ts           pure presentation helpers
     styles.css          all styling; no inline styles anywhere
+    tools/              everything that reads a tool call
+      args.ts           tolerant access to an argument payload
+      diff.ts           the change an edit or write made, and its rendering
+      risk.ts           "looks destructive", and why
+      present.ts        per-tool presenter registry -> one view model
+      card.ts           the transcript's tool card: mount, update, keep time
     views/
       pair.ts           screen 1
       sessions.ts       screen 2
       conversation.ts   screen 3
+      feedrows.ts       row kinds -> nodes (message, tool, tool run, notice)
       approval.ts       screen 4 (mounted globally, not inside a view)
       settings.ts       screen 5
       ui.ts             shared badge / bottom sheet / select
