@@ -24,7 +24,9 @@ the narrative. The security reasoning behind the shape of it is in
                         │
   HOME MAC ─────────────┘
       frpc (launchd) ──> 127.0.0.1:8787
-      dsh-gateway (launchd, loopback only)
+      dsh-gateway (launchd, loopback only)      the tier a redeploy replaces
+        └─ connects over a unix socket to
+      dsh-agent-host (launchd, its own job)     the tier that holds the work
         └─ spawns: dsh --profile acp
 ```
 
@@ -37,6 +39,23 @@ the narrative. The security reasoning behind the shape of it is in
 | 22/tcp | VPS | you | SSH |
 | 8787/tcp | Mac **loopback only** | frpc on the same Mac | the gateway itself |
 | 3080/tcp | Mac loopback | the gateway, if the desktop GUI proxy is enabled | optional, off by default |
+| `~/.dsh-gateway/agent-host.sock` | Mac filesystem | the gateway, as the same user | the agent host; mode 0600 inside a 0700 directory, so no other account can reach it |
+
+There are two long-lived processes on the Mac, not one. `dsh-gateway` serves the
+phone; `dsh-agent-host` holds the DeepSeek Harness child and the turns it is
+running. They are separate launchd jobs on purpose, and the reason is worth
+knowing before you edit a plist: launchd kills every process in a job's process
+group when that job dies, so a host started by the gateway would be killed by
+exactly the redeploy it exists to survive. The gateway can be replaced while a
+turn keeps running because the process holding the turn is not the one being
+replaced.
+
+There is no way to run the agent inside the gateway, and that is deliberate. It
+used to be an option (`dsh.mode: in-process`); it was removed because a gateway
+that runs the agent itself is a gateway whose redeploy ends whatever turn is in
+flight — the precise failure the second process exists to prevent. `dsh.mode` is
+still accepted so that a config file which names the old value produces a
+sentence explaining this rather than a silent change in behaviour.
 
 Both Caddy ports are defaults, not constants: `--https-port` and `--http-port`
 change them. Nothing listens on 80 or 443. The shipped pair exists because some

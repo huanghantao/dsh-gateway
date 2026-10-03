@@ -1,3 +1,10 @@
+// Package acp implements the harness port over an ACP stdio child.
+//
+// It lives under the agent host because that is the only thing that uses it: the
+// gateway drives the agent across a socket and never spawns a child itself, so
+// the package's home is a statement about the architecture rather than a filing
+// decision. There is no way for the gateway to run the agent in-process, because
+// it does not contain the code that could.
 package acp
 
 import (
@@ -483,6 +490,25 @@ func (a *Adapter) ResumeSession(ctx context.Context, sessionID, workspace string
 
 // CloseSession implements harness.Harness. It releases DSH's write lock, which is
 // what lets the desktop open the session again.
+// ReleaseSession detaches a session, which this adapter cannot do.
+//
+// DSH offers exactly one lever for a session an ACP client holds — `session/close`
+// — and closing is not detaching: it writes a synthetic end to the session's own
+// log. The first version of this method called it anyway, which meant a lease
+// expiring while a phone was idle left a visible "this conversation is over"
+// boundary behind it, every few minutes.
+//
+// So it refuses. The agent host never calls it (it keeps its handle, which is
+// what a detach means there), and an implementation that cannot honour a
+// contract should say so rather than approximate it: a caller seeing this error
+// knows the session is still held, while a caller seeing `nil` would believe it
+// had been let go.
+func (a *Adapter) ReleaseSession(context.Context, string) error {
+	return errx.New(errx.KindUnavailable, "release_unsupported",
+		"this adapter holds its sessions for the life of the process and cannot "+
+			"detach one; the agent host does not call this")
+}
+
 func (a *Adapter) CloseSession(ctx context.Context, sessionID string) error {
 	c, err := a.currentConn()
 	if err != nil {

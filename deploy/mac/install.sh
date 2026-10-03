@@ -56,6 +56,19 @@ WORKSPACES="${WORKSPACES:-}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 GATEWAY_LABEL="dev.dsh-gateway.gateway"
+# The agent host is a *peer* job, not a child of the gateway's, and that is
+# load-bearing rather than tidiness: launchd kills every process in a job's
+# process group when the job dies, so a host spawned by the gateway would be
+# killed by exactly the event it exists to survive. Two labels, two jobs, two
+# lifetimes.
+AGENT_HOST_LABEL="dev.dsh-gateway.agent-host"
+
+# How long launchd waits between SIGTERM and SIGKILL for either job. It has to
+# exceed the interval between two heartbeats, and there are two of them: a
+# gateway draining before a redeploy, and a host draining before its own
+# restart. Long enough for a turn that is nearly finished, short enough that a
+# wedged process does not hold a deploy forever.
+EXIT_TIMEOUT_SECONDS=180
 FRPC_LABEL="dev.dsh-gateway.frpc"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -444,31 +457,42 @@ build_web() {
        only honest outcome."
 }
 
-build_gateway() {
-	# Stamp the build so `dsh-gateway version` means something when something is
-	# wrong six months from now. git describe needs a repository with commits and
-	# tags; a source tarball has neither, hence the fallback instead of a failure.
-	local stamp="" ldflags=()
-	stamp="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || true)"
-	if [[ -n $stamp && $stamp != *" "* ]]; then
-		ldflags=(-ldflags "-X main.version=$stamp")
-	fi
-	log "building the gateway: go build ./cmd/dsh-gateway${stamp:+ (version $stamp)}"
+# build_binary builds one command into the staging directory and installs it.
+#
+# It exists because there are now two binaries, and the properties that made the
+# original safe apply to each: built into a temp directory so a failed build
+# cannot leave a half-written file where launchd will exec it, and installed
+# only after the build succeeded.
+build_binary() {
+	local name="$1" pkg="$2"
+	log "building $name: go build ./$pkg${BUILD_STAMP:+ (version $BUILD_STAMP)}"
 	# ${ldflags[@]+...} rather than ${ldflags[@]}: this machine's /bin/bash is
 	# 3.2, where expanding an empty array under `set -u` is an unbound-variable
 	# error rather than an empty expansion.
-	if ! (cd "$REPO_ROOT" && go build -trimpath ${ldflags[@]+"${ldflags[@]}"} -o "$WORK_DIR/dsh-gateway" ./cmd/dsh-gateway); then
-		die "go build ./cmd/dsh-gateway failed. The usual causes:
-       * this checkout has no main package at cmd/dsh-gateway (a partial
-         checkout still needs the gateway source, not just deploy/);
+	if ! (cd "$REPO_ROOT" && go build -trimpath ${BUILD_LDFLAGS[@]+"${BUILD_LDFLAGS[@]}"} -o "$WORK_DIR/$name" "./$pkg"); then
+		die "go build ./$pkg failed. The usual causes:
+       * this checkout has no main package at $pkg (a partial checkout still
+         needs the source, not just deploy/);
        * dependencies are missing: (cd $REPO_ROOT && go mod download);
        * the embedded web app is missing: (cd $REPO_ROOT && make web);
        * Go is older than go.mod requires (1.25+)."
 	fi
-	# Built into a temp dir first so a failed build cannot leave a broken or
-	# half-written binary where launchd will exec it.
-	install -m 0755 "$WORK_DIR/dsh-gateway" "$INSTALL_DIR/dsh-gateway"
-	log "installed $INSTALL_DIR/dsh-gateway ($("$INSTALL_DIR/dsh-gateway" version 2>/dev/null || printf 'version unknown'))"
+	install -m 0755 "$WORK_DIR/$name" "$INSTALL_DIR/$name"
+	log "installed $INSTALL_DIR/$name ($("$INSTALL_DIR/$name" version 2>/dev/null || printf 'version unknown'))"
+}
+
+build_gateway() {
+	# Stamp the build so `dsh-gateway version` means something when something is
+	# wrong six months from now. git describe needs a repository with commits and
+	# tags; a source tarball has neither, hence the fallback instead of a failure.
+	BUILD_STAMP="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || true)"
+	BUILD_LDFLAGS=()
+	if [[ -n $BUILD_STAMP && $BUILD_STAMP != *" "* ]]; then
+		BUILD_LDFLAGS=(-ldflags "-X main.version=$BUILD_STAMP")
+	fi
+
+	build_binary dsh-gateway cmd/dsh-gateway
+	build_binary dsh-agent-host cmd/dsh-agent-host
 }
 
 # ---------------------------------------------------------------------------
@@ -676,6 +700,26 @@ write_plists() {
 		gw_args_xml+="		<string>$(xml_escape "$arg")</string>"$'\n'
 	done
 
+	# The agent host is the same binary shape: a subcommand CLI that takes
+	# -config. Its arguments are derived from the gateway's probe rather than
+	# guessed again, so the two cannot disagree about how this repository's
+	# commands are invoked.
+	local host_bin="$INSTALL_DIR/dsh-agent-host" host_args_xml=""
+	local -a host_argv=("$host_bin")
+	# Both binaries come from this repository and share a CLI shape, so the
+	# gateway's probe decides for both: `-h` exits 0 when the build has
+	# subcommands, and -config is advertised in the same usage text.
+	if [[ $help_rc -eq 0 ]]; then
+		host_argv+=("serve")
+	fi
+	if [[ $run_help == *"-config"* ]]; then
+		host_argv+=("-config" "$CONFIG_FILE")
+	fi
+	for arg in "${host_argv[@]}"; do
+		host_args_xml+="		<string>$(xml_escape "$arg")</string>"$'\n'
+	done
+	log "agent host command: ${host_argv[*]}"
+
 	local tmp changed
 	tmp="$(mktemp "$WORK_DIR/plist.XXXXXX")"
 	cat >"$tmp" <<EOF
@@ -727,6 +771,12 @@ $gw_args_xml	</array>
 	<string>$(xml_escape "$LOG_DIR/gateway.log")</string>
 	<key>StandardOutPath</key>
 	<string>$(xml_escape "$LOG_DIR/gateway.stdout.log")</string>
+	<!-- How long launchd waits between SIGTERM and SIGKILL. Its default is
+	     shorter than a gateway finishing its drain, so without this a redeploy
+	     would SIGKILL the process it just asked to stop politely - which is the
+	     failure the drain exists to prevent. -->
+	<key>ExitTimeOut</key>
+	<integer>${EXIT_TIMEOUT_SECONDS}</integer>
 </dict>
 </plist>
 EOF
@@ -735,6 +785,64 @@ EOF
 		log "wrote $AGENT_DIR/$GATEWAY_LABEL.plist"
 	else
 		log "$GATEWAY_LABEL.plist unchanged"
+	fi
+
+
+	# The agent host's own job. It is a peer of the gateway's, not its child:
+	# launchd kills every process in a job's process group when the job dies, so
+	# a host started by the gateway would be killed by exactly the event it
+	# exists to survive - and the two-tier design would appear to work while
+	# doing nothing.
+	tmp="$(mktemp "$WORK_DIR/plist.XXXXXX")"
+	cat >"$tmp" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$AGENT_HOST_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+$host_args_xml	</array>
+	<!-- Kept running: this process holds the agent and every turn in flight, so
+	     its lifetime is deliberately not tied to any client's. -->
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>$(xml_escape "$HOME")</string>
+	<!-- Same PATH reasoning as the gateway's: launchd gives a job a minimal PATH
+	     and no shell profile, so the node/nvm bin directory has to be named or
+	     the host cannot find `dsh` to launch it with. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>$(xml_escape "$search_path")</string>
+		<key>HOME</key>
+		<string>$(xml_escape "$HOME")</string>
+		<key>DSH_GATEWAY_STATE_DIR</key>
+		<string>$(xml_escape "$CONFIG_DIR")</string>
+	</dict>
+	<!-- A host restart is the one restart that can end a turn, so its shutdown
+	     drains first. This is the ceiling launchd allows that drain before it
+	     stops asking. -->
+	<key>ExitTimeOut</key>
+	<integer>${EXIT_TIMEOUT_SECONDS}</integer>
+	<key>StandardErrorPath</key>
+	<string>$(xml_escape "$LOG_DIR/agent-host.log")</string>
+	<key>StandardOutPath</key>
+	<string>$(xml_escape "$LOG_DIR/agent-host.stdout.log")</string>
+</dict>
+</plist>
+EOF
+	changed="$(install_file_if_changed "$tmp" "$AGENT_DIR/$AGENT_HOST_LABEL.plist" 0644)"
+	if [[ $changed == "1" ]]; then
+		log "wrote $AGENT_DIR/$AGENT_HOST_LABEL.plist"
+	else
+		log "$AGENT_HOST_LABEL.plist unchanged"
 	fi
 
 	tmp="$(mktemp "$WORK_DIR/plist.XXXXXX")"
@@ -793,33 +901,131 @@ EOF
 	fi
 }
 
+# stop_job asks a running job to stop and waits for it to go, bounded by
+# EXIT_TIMEOUT_SECONDS.
+#
+# It replaces the unconditional `bootout` this script used to do, and the
+# difference is the whole point of the agent-host tier. `bootout` sends SIGTERM
+# and then stops waiting, so a gateway with a minute of work left in it was
+# killed on launchd's schedule rather than its own - and a turn that had been
+# running for twelve minutes was destroyed by a deploy that could have waited.
+#
+# It waits for the *process* rather than for launchd's bookkeeping: `kill -0` on
+# the pid launchd reports is the only answer to "has it actually stopped", and
+# the pid is free the moment it has.
+stop_job() {
+	local label="$1" uid
+	uid="$(id -u)"
+
+	launchctl print "gui/$uid/$label" >/dev/null 2>&1 || return 0
+
+	local pid
+	pid="$(launchctl print "gui/$uid/$label" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')"
+	if [[ -z $pid ]]; then
+		# Loaded but not running: nothing to wait for.
+		launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+		return 0
+	fi
+
+	log "asking $label (pid $pid) to stop; it may be finishing a turn"
+	kill -TERM "$pid" 2>/dev/null || true
+
+	local waited=0
+	while kill -0 "$pid" 2>/dev/null; do
+		if (( waited >= EXIT_TIMEOUT_SECONDS )); then
+			warn "$label (pid $pid) did not stop within ${EXIT_TIMEOUT_SECONDS}s.
+       Its drain window is the same length, so this usually means a turn is
+       still running. Inspect it, then either wait for it or stop the job by
+       hand:
+         tail -30 $LOG_DIR/${label##*.}.log
+         launchctl kickstart -k gui/$uid/$label"
+			break
+		fi
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+
+	# Whatever happened, the job must be out of the way before bootstrapping the
+	# replacement: bootstrap fails with "service already loaded" otherwise, and
+	# the fallback below fails the same way - which used to leave the service
+	# DOWN while reporting only a warning.
+	launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+
+	waited=0
+	while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+		if (( waited >= 20 )); then
+			warn "$label is still loaded 10s after bootout; trying anyway"
+			break
+		fi
+		sleep 0.5
+		waited=$((waited + 1))
+	done
+}
+
+# job_pid prints the pid launchd reports for a job, or nothing.
+job_pid() {
+	local label="$1" uid
+	uid="$(id -u)"
+	launchctl print "gui/$uid/$label" 2>/dev/null \
+		| sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# wait_for_stable watches a job for a few seconds and reports whether it was
+# replaced while being watched.
+#
+# `launchctl bootstrap` returning success means launchd accepted the definition,
+# not that a process is up and staying up — and every other check here is happy
+# with a job that is being restarted repeatedly, because a *previous* instance is
+# still answering. Observed on a real deployment: two processes claimed the
+# listening socket about half a second apart on every single deploy, while the
+# installer reported success each time. The service was fine within a second, so
+# nothing was broken — but "the deploy succeeded" was true for a reason nobody
+# had checked, and a half-second window with no gateway in it is exactly the kind
+# of thing that is blamed on the phone.
+#
+# The pid changing is the signal, and it cannot be faked by a process that is
+# merely busy. The first sample is taken *immediately* and then watched: the
+# replacement observed in practice landed at about 500ms, so a reading taken after
+# a settling sleep would have missed it entirely — which the first version of
+# this check did.
+wait_for_stable() {
+	local label="$1" uid first last changes=0 waited=0
+	uid="$(id -u)"
+
+	# launchd has already started it by the time bootstrap returns, so the pid
+	# to compare against exists now.
+	first="$(job_pid "$label")"
+	last="$first"
+
+	while (( waited < 32 )); do
+		sleep 0.2
+		waited=$((waited + 1))
+		local pid
+		pid="$(job_pid "$label")"
+		if [[ -n $pid && $pid != "$last" ]]; then
+			changes=$((changes + 1))
+			last="$pid"
+		fi
+	done
+
+	if (( changes > 0 )); then
+		warn "$label was replaced $changes time(s) in the 6s after it was loaded
+       (first pid ${first:-none}, now ${last:-none}). It is serving, and the
+       deployment works, but the process answering is not the one that was
+       started — so a request in that window saw no gateway at all. Worth
+       knowing before blaming the phone. Inspect it:
+         launchctl print gui/$uid/$label | grep -E 'pid|runs|last exit'
+         tail -40 $LOG_DIR/${label##*.}.log"
+		return 1
+	fi
+	return 0
+}
+
 bootstrap_agent() {
 	local label="$1" plist="$2" uid
 	uid="$(id -u)"
 
-	if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
-		# Already loaded: boot out first, otherwise bootstrap fails with
-		# "service already loaded" and a stale plist/binary stays in effect.
-		launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
-
-		# Wait for the job to actually disappear before bootstrapping it again.
-		#
-		# bootout returns as soon as the request is accepted, not when launchd
-		# has finished tearing the job down. Bootstrapping into that window fails
-		# with the famously unhelpful "Bootstrap failed: 5: Input/output error",
-		# and the fallback below fails the same way — so re-running this script
-		# left the service DOWN while reporting only a warning. Every operator
-		# who re-runs it to change a setting would have hit that.
-		local waited=0
-		while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
-			if (( waited >= 100 )); then
-				warn "$label is still loaded 10s after bootout; trying anyway"
-				break
-			fi
-			sleep 0.1
-			waited=$((waited + 1))
-		done
-	fi
+	stop_job "$label"
 
 	# Retry as well as wait: the teardown window is not the only source of a
 	# transient failure, and a second attempt is cheap next to leaving a service
@@ -827,6 +1033,7 @@ bootstrap_agent() {
 	for _ in 1 2 3 4 5; do
 		if launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
 			launchctl enable "gui/$uid/$label" 2>/dev/null || true
+			wait_for_stable "$label"
 			log "loaded $label"
 			return 0
 		fi
@@ -914,6 +1121,7 @@ Mac setup complete.
 =============================================================================
 
   Gateway binary      $INSTALL_DIR/dsh-gateway
+  Agent host binary   $INSTALL_DIR/dsh-agent-host
   frpc binary         $INSTALL_DIR/frpc ($FRP_VERSION)
   Tunnel              $FRP_SERVER:$FRP_CONTROL_PORT  →  local 127.0.0.1:8787
   Public URL          $PUBLIC_URL
@@ -921,7 +1129,7 @@ Mac setup complete.
   frpc config         $FRPC_CONFIG  (0600)
   Logs                $LOG_DIR/
 
-  launchd jobs        $GATEWAY_LABEL, $FRPC_LABEL
+  launchd jobs        $AGENT_HOST_LABEL, $GATEWAY_LABEL, $FRPC_LABEL
   PATH for jobs       $RESOLVED_SEARCH_PATH
   dsh binary          $RESOLVED_DSH_BIN
 
@@ -953,6 +1161,31 @@ Useful commands:
      bash $REPO_ROOT/deploy/mac/install.sh --help
 $path_note
 EOF
+}
+
+# verify_host_up asks the agent host whether it is serving, using its own status
+# command rather than a socket probe: "listening" and "answering" are different
+# facts, and the one that matters is the second.
+verify_host_up() {
+	local out=""
+	for _ in $(seq 1 20); do
+		out="$("$INSTALL_DIR/dsh-agent-host" status -config "$CONFIG_FILE" -timeout 2s 2>&1 || true)"
+		if [[ $out == *"agent host"* ]]; then
+			log "agent host is serving"
+			return 0
+		fi
+		sleep 1
+	done
+	warn "the agent host did not answer within 20s.
+
+       Read the log first:
+         tail -40 $LOG_DIR/agent-host.log
+
+       To see what launchd thinks:
+         launchctl print gui/$(id -u)/$AGENT_HOST_LABEL | head -40
+
+       The gateway will keep retrying the connection, so this is not fatal - but
+       nothing can run until it is up."
 }
 
 # verify_gateway_up asks the gateway's own liveness endpoint whether it came up,
@@ -1031,6 +1264,12 @@ main() {
 	write_config_yaml
 	write_plists
 
+	# Order matters, and not for tidiness: the gateway connects to the host at
+	# start-up, and starting it first would make every deploy begin with a
+	# reconnect loop. The host is a peer job, so it survives the gateway being
+	# replaced a moment later.
+	bootstrap_agent "$AGENT_HOST_LABEL" "$AGENT_DIR/$AGENT_HOST_LABEL.plist"
+	verify_host_up
 	bootstrap_agent "$GATEWAY_LABEL" "$AGENT_DIR/$GATEWAY_LABEL.plist"
 	bootstrap_agent "$FRPC_LABEL" "$AGENT_DIR/$FRPC_LABEL.plist"
 

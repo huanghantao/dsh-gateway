@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huanghantao/dsh-gateway/internal/agenthost/hostlink"
+	"github.com/huanghantao/dsh-gateway/internal/agenthost/hostwire"
 	"github.com/huanghantao/dsh-gateway/internal/config"
 )
 
@@ -103,6 +105,7 @@ func runDoctor(args []string) error {
 	results := []doctorResult{
 		checkConfig(cfg, cfgPath),
 		checkStateDir(cfg),
+		checkAgentHost(ctx, cfg, timeout),
 		checkLocalGateway(ctx, cfg, timeout),
 		checkTunnelConfig(cfg),
 		checkTunnelControl(ctx, cfg, timeout),
@@ -161,6 +164,75 @@ func checkConfig(cfg config.Config, path string) doctorResult {
 		r.status = statusWarn
 		r.hint = "auth.trustedProxies is empty, so X-Forwarded-Proto from your proxy is not believed; " +
 			"cookies will not be marked Secure even though the deployment is HTTPS"
+	}
+	return r
+}
+
+// checkAgentHost asks whether the process that holds the agent is there.
+//
+// It is the first thing to be wrong when the phone stops working, because it is
+// the one component with a lifetime of its own: a gateway that is up while its
+// host is down reports every session as idle and refuses to start a turn, and
+// from the phone that looks like an agent that has stopped thinking.
+func checkAgentHost(ctx context.Context, cfg config.Config, timeout time.Duration) doctorResult {
+	socket := cfg.SocketPath()
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := hostlink.Dial(probeCtx, socket, 0)
+	if err != nil {
+		return doctorResult{
+			status: statusFail,
+			title:  "the agent host is not answering",
+			detail: fmt.Sprintf("%s: %v", socket, err),
+			hint: "start it, or look at why it stopped:" +
+				"\n          launchctl print gui/$(id -u)/dev.dsh-gateway.agent-host | head -30" +
+				"\n          tail -40 ~/Library/Logs/dsh-gateway/agent-host.log" +
+				"\n          dsh-agent-host status",
+		}
+	}
+	defer func() { _ = conn.Close() }()
+
+	wire := hostwire.NewConn(conn)
+	wire.SetErrorClassifier(func(err error) *hostwire.Error { return hostwire.ErrorOf(err) })
+	wire.Start()
+
+	// A read-only probe. `doctor` is run precisely when something is wrong, and
+	// a diagnostic that disconnects the gateway it is diagnosing would be worse
+	// than no diagnostic at all.
+	var hello hostwire.HelloResult
+	if err := wire.Call(probeCtx, hostwire.MethodHello, hostwire.Hello{
+		Protocol: hostwire.Protocol, Caller: "doctor",
+	}, &hello); err != nil {
+		return doctorResult{
+			status: statusFail,
+			title:  "the agent host accepted a connection but did not answer",
+			detail: err.Error(),
+			hint: "a host that listens and does not speak is wedged rather than absent:" +
+				"\n          tail -40 ~/Library/Logs/dsh-gateway/agent-host.log",
+		}
+	}
+
+	var status hostwire.StatusResult
+	if err := wire.Call(probeCtx, hostwire.MethodStatus, nil, &status); err != nil {
+		return doctorResult{status: statusWarn, title: "the agent host answered but not its status",
+			detail: err.Error()}
+	}
+
+	r := doctorResult{
+		status: statusOK,
+		title:  "the agent host is serving",
+		detail: fmt.Sprintf("harness %s, %d session(s) held, %d turn(s) running",
+			status.State, status.SessionsHeld, status.TurnsRunning),
+	}
+	if status.Draining {
+		r.status = statusWarn
+		r.hint = "the host is draining for a restart; turns in flight are being ended"
+	}
+	if status.State != hostwire.StateReady {
+		r.status = statusWarn
+		r.hint = "the host is up but its child is not ready; the log says why:" +
+			"\n          tail -40 ~/Library/Logs/dsh-gateway/agent-host.log"
 	}
 	return r
 }

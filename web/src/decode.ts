@@ -37,8 +37,11 @@ import type {
   ReasoningEffortOption,
   ServerEvent,
   Session,
+  SessionTurnSnapshot,
   SessionListResponse,
   SessionPatch,
+  SnapshotData,
+  ThoughtData,
   TokenUsage,
   ToolData,
   ToolPhase,
@@ -729,7 +732,40 @@ function decodeHello(value: unknown): HelloData {
   const source = isRecord(value) ? value : {};
   return {
     deviceId: asString(field(source, "deviceId"), ""),
+    generation: asString(field(source, "generation"), ""),
     replayFrom: asNumberOrNull(field(source, "replayFrom")),
+  };
+}
+
+/**
+ * Decodes a snapshot. Every part of it is optional in the sense that a missing
+ * one degrades to "nothing to say" rather than to a broken frame: an older
+ * server that sends no `turns` must not stop a client rendering the harness
+ * state it did send.
+ */
+function decodeSnapshot(value: unknown): SnapshotData {
+  const source = isRecord(value) ? value : {};
+  const turns: SessionTurnSnapshot[] = [];
+  for (const entry of asArray(field(source, "turns"))) {
+    if (!isRecord(entry)) continue;
+    const sessionId = asStringOrNull(field(entry, "sessionId"));
+    if (sessionId === null) continue;
+    const running = field(entry, "running");
+    turns.push({
+      sessionId,
+      running: running === undefined || running === null ? null : decodeTurnState(running),
+      queued: asArray(field(entry, "queued")).map(decodeTurnState),
+    });
+  }
+  return {
+    generation: asString(field(source, "generation"), ""),
+    seq: asNumber(field(source, "seq"), 0),
+    time: asString(field(source, "time"), ""),
+    harness: decodeHarnessState(field(source, "harness")),
+    turns,
+    approvals: asArray(field(source, "approvals"))
+      .map(decodeApproval)
+      .filter((a): a is Approval => a !== null),
   };
 }
 
@@ -888,8 +924,26 @@ export function decodeServerEvent(value: unknown): ServerEvent | null {
       return { ...envelope, type, data: decodeTurnState(data) };
     case "harness.state":
       return { ...envelope, type, data: decodeHarnessState(data) };
-    case "resync":
-      return { ...envelope, type, data: null };
+    case "session.thought": {
+      const source = isRecord(data) ? data : {};
+      const thought: ThoughtData = {
+        id: asStringOrNull(field(source, "id")),
+        text: asString(field(source, "text"), ""),
+      };
+      return { ...envelope, type, data: thought };
+    }
+    case "snapshot":
+      return { ...envelope, type, data: decodeSnapshot(data) };
+    case "gateway.draining": {
+      const source = isRecord(data) ? data : {};
+      return { ...envelope, type, data: { reason: asString(field(source, "reason"), "") } };
+    }
+    case "resync": {
+      // The reason is for the operator, not the state machine: every resync
+      // means the same thing to the client.
+      const source = isRecord(data) ? data : {};
+      return { ...envelope, type, data: { reason: asString(field(source, "reason"), "") } };
+    }
     default:
       return null;
   }

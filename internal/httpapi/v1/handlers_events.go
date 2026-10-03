@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/httpcore"
@@ -18,14 +20,22 @@ import (
 // eventsHandler serves the multiplexed event stream.
 //
 // The connection is the client's window onto every session at once, so it must
-// survive radio changes, backgrounded tabs, and sleeping phones. Three details
+// survive radio changes, backgrounded tabs, sleeping phones, and — the case this
+// file exists for — the gateway being redeployed underneath it. Four details
 // make that work:
 //
-//   - Replay from a sequence number, so a reconnect does not lose output.
+//   - A cursor of (generation, seq), so a reconnect can be told apart from a
+//     cursor that belongs to a process which no longer exists.
+//   - Replay from that cursor, so a reconnect does not lose output.
+//   - A resync *and a snapshot* when the cursor cannot be honoured, so a client
+//     that reconnects across a restart is told what the state is rather than
+//     only that its copy of it is wrong.
 //   - Server-side pings, so an idle tunnel is kept open and a dead peer is
 //     noticed.
-//   - A resync signal when the client fell too far behind, so the UI refetches
-//     instead of rendering a stream with an invisible hole in it.
+//
+// The invariant the whole design rests on: there is no outcome in which the
+// connection looks healthy and the client is silently missing frames. Every
+// cursor either resumes exactly or produces a resync.
 type eventsHandler struct {
 	server *Server
 
@@ -82,18 +92,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var since uint64
-	if raw := r.URL.Query().Get("since"); raw != "" {
-		var parsed uint64
-		for i := 0; i < len(raw); i++ {
-			if raw[i] < '0' || raw[i] > '9' {
-				parsed = 0
-				break
-			}
-			parsed = parsed*10 + uint64(raw[i]-'0')
-		}
-		since = parsed
-	}
+	cursor := parseCursor(r)
 
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// The origin policy is enforced above, against the Host the browser
@@ -111,7 +110,10 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	h.ws = ws
 
 	s.deps.Logger.Info("event stream opened",
-		"device", principal.DeviceID, "since", since, "client_ip", clientKey(r))
+		"device", principal.DeviceID,
+		"since", cursor.Seq,
+		"generation", shortGeneration(cursor.Generation),
+		"client_ip", clientKey(r))
 	defer func() {
 		_ = ws.CloseNow()
 		s.deps.Logger.Info("event stream closed", "device", principal.DeviceID)
@@ -121,15 +123,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// frame means something is wrong.
 	ws.SetReadLimit(64 << 10)
 
-	sub, replayMissing := s.deps.Bus.Subscribe(since, h.match)
-	defer sub.Close()
+	// Subscribe before taking the snapshot, and label the snapshot with the
+	// watermark observed here. The order is what makes the two halves compose:
+	// everything published before this line is either replayed or superseded by
+	// the snapshot, and everything published after it arrives on the stream with
+	// a sequence number greater than the one the snapshot claims. A duplicate is
+	// possible in the overlap and is harmless — every frame here is idempotent —
+	// whereas a gap would not be.
+	resume := s.deps.Bus.Subscribe(cursor, h.match)
+	defer resume.Subscription.Close()
+	snapshotAt := s.deps.Bus.Watermark()
 
 	// Bound the lifetime so that a forgotten tab does not hold a connection (and
-	// a bus subscription) open indefinitely. Clients reconnect with `since`, so
-	// this is invisible to them.
-	// A bounded lifetime, not a derived deadline: the connection ends when its
-	// own 12-hour budget expires or the client leaves. Clients reconnect with
-	// `since`, so the bound is invisible to them.
+	// a bus subscription) open indefinitely. Clients reconnect with their cursor,
+	// so this is invisible to them.
 	ctx, cancel := context.WithTimeout(h.ctx, 12*time.Hour)
 	defer cancel()
 
@@ -141,29 +148,79 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if err := h.writeJSON(ctx, map[string]any{ //nolint:contextcheck // see above
 		"type": events.TypeHello,
 		"data": map[string]any{
-			"deviceId":     principal.DeviceID,
-			"replayFrom":   since,
-			"serverTime":   time.Now().UTC(),
-			"harnessState": string(s.deps.Harness.State()),
+			"deviceId":   principal.DeviceID,
+			"generation": s.deps.Bus.Generation(),
+			"replayFrom": resume.From,
+			"serverTime": time.Now().UTC(),
 		},
 	}); err != nil {
 		return
 	}
-	if replayMissing {
-		// The client asked for events older than the replay buffer holds. Tell it
-		// plainly so it refetches rather than rendering an incomplete stream.
-		// Seq 0 marks a control frame that carries no position in the stream, so
-		// a client must not bookmark it as its resume point.
+
+	if !resume.Resumable() {
+		// A first connection and an unusable cursor are both repaired with a
+		// snapshot, and they are not the same thing to a client. A resync is an
+		// instruction — "everything you are showing is suspect, refetch it" —
+		// and it costs three requests. A client that has never held a cursor is
+		// showing nothing yet: bootstrap is about to fetch its state anyway, and
+		// telling it to refetch is telling it to do what it is already doing.
+		//
+		// So only a cursor that existed and could not be honoured earns one.
+		if resume.Reason != events.ResyncNoCursor {
+			// The order matters: the resync comes first, so a client that renders
+			// frames as they arrive has already been told its copy is suspect
+			// before the replacement for it arrives.
+			if err := h.writeJSON(ctx, events.Event{ //nolint:contextcheck // see above
+				Time: time.Now().UTC(),
+				Type: events.TypeResync,
+				Data: map[string]any{"reason": resume.Reason.String()},
+			}); err != nil {
+				return
+			}
+			s.deps.Logger.Info("event stream resynchronised",
+				"device", principal.DeviceID,
+				"reason", resume.Reason.String(),
+				"snapshotAt", snapshotAt)
+		}
 		if err := h.writeJSON(ctx, events.Event{ //nolint:contextcheck // see above
+			Seq:  snapshotAt,
 			Time: time.Now().UTC(),
-			Type: events.TypeResync,
-			Data: map[string]any{"reason": "replay window exceeded"},
+			Type: events.TypeSnapshot,
+			Data: s.snapshot(h.scope(), snapshotAt),
 		}); err != nil {
 			return
 		}
 	}
 
-	h.pump(ctx, sub) //nolint:contextcheck // connected to the client, not to a request
+	h.pump(ctx, resume.Subscription) //nolint:contextcheck // connected to the client, not to a request
+}
+
+// parseCursor reads the client's position from the query string.
+//
+// A malformed value is treated as no cursor rather than as an error: the query
+// string is not the place to fail a connection, and "no cursor" already has a
+// defined, safe meaning — resync and snapshot.
+func parseCursor(r *http.Request) events.Cursor {
+	q := r.URL.Query()
+	cursor := events.Cursor{Generation: q.Get("generation")}
+	if raw := q.Get("since"); raw != "" {
+		if n, err := strconv.ParseUint(raw, 10, 64); err == nil {
+			cursor.Seq = n
+		}
+	}
+	return cursor
+}
+
+// shortGeneration abbreviates a generation for a log line. It is a label, not a
+// secret, but a full one in every log record is noise.
+func shortGeneration(g string) string {
+	if len(g) > 8 {
+		return g[:8]
+	}
+	if g == "" {
+		return "-"
+	}
+	return g
 }
 
 // pump forwards bus events until the connection ends.
@@ -188,12 +245,11 @@ func (h *eventsHandler) pump(ctx context.Context, sub *events.Subscription) {
 			if !ok {
 				return
 			}
-			if sub.TakeResync() {
-				if err := h.writeJSON(ctx, events.Event{
-					Time: time.Now().UTC(),
-					Type: events.TypeResync,
-					Data: map[string]any{"reason": "this client fell behind and events were dropped"},
-				}); err != nil {
+			// Falling behind is discovered here rather than at reconnect: this
+			// client is connected and still lost frames, so it needs both halves
+			// of the repair immediately.
+			if reason := sub.TakeResync(); reason != "" {
+				if err := h.resync(ctx, reason); err != nil {
 					return
 				}
 			}
@@ -202,6 +258,50 @@ func (h *eventsHandler) pump(ctx context.Context, sub *events.Subscription) {
 			}
 		}
 	}
+}
+
+// resync tells a connected client that it lost frames, and what the state is.
+func (h *eventsHandler) resync(ctx context.Context, reason events.ResyncReason) error {
+	at := h.server.deps.Bus.Watermark()
+	if err := h.writeJSON(ctx, events.Event{
+		Time: time.Now().UTC(),
+		Type: events.TypeResync,
+		Data: map[string]any{"reason": reason.String()},
+	}); err != nil {
+		return err
+	}
+	return h.writeJSON(ctx, events.Event{
+		Seq:  at,
+		Time: time.Now().UTC(),
+		Type: events.TypeSnapshot,
+		Data: h.server.snapshot(h.scope(), at),
+	})
+}
+
+// snapshotFrame is the snapshot as it goes on the wire.
+//
+// The bus layer's events.Snapshot carries what that leaf package can describe;
+// pending approvals are added here, because this is the layer that holds both
+// the broker and the serialisation of an approval, and duplicating that shape
+// into the bus would be a second thing to keep in step.
+type snapshotFrame struct {
+	events.Snapshot
+	Approvals []approvals.View `json:"approvals"`
+}
+
+// scope reports the sessions this connection asked for. An empty result means
+// "everything", which is what a connection with no filter wants.
+func (h *eventsHandler) scope() []string {
+	h.subMu.RLock()
+	defer h.subMu.RUnlock()
+	if len(h.filters) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(h.filters))
+	for id := range h.filters {
+		out = append(out, id)
+	}
+	return out
 }
 
 // readLoop consumes client control frames.
@@ -220,11 +320,19 @@ func (h *eventsHandler) readLoop(ctx context.Context) {
 			if msg.SessionID == "" {
 				continue
 			}
-			h.subMu.Lock()
-			h.filters[msg.SessionID] = struct{}{}
-			h.subMu.Unlock()
+			first := h.addFilter(msg.SessionID)
 			// Subscribing is activity, so it keeps that session's lease alive.
 			h.server.deps.Leases.Touch(msg.SessionID)
+			// A session the client has just started watching is the one case
+			// where it has no context at all: it asked for frames about a
+			// session, and if a turn is already running there, the frames that
+			// announced it are in the past. Sending the session's slice of the
+			// snapshot closes that hole without a REST round trip.
+			if first {
+				if err := h.sessionSnapshot(ctx, msg.SessionID); err != nil {
+					return
+				}
+			}
 
 		case "unsubscribe":
 			h.subMu.Lock()
@@ -239,6 +347,30 @@ func (h *eventsHandler) readLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// addFilter records a subscription and reports whether it was new.
+func (h *eventsHandler) addFilter(sessionID string) bool {
+	h.subMu.Lock()
+	defer h.subMu.Unlock()
+	if _, ok := h.filters[sessionID]; ok {
+		return false
+	}
+	h.filters[sessionID] = struct{}{}
+	return true
+}
+
+// sessionSnapshot sends the state of one session to a client that has just
+// started watching it.
+func (h *eventsHandler) sessionSnapshot(ctx context.Context, sessionID string) error {
+	at := h.server.deps.Bus.Watermark()
+	return h.writeJSON(ctx, events.Event{
+		Seq:       at,
+		Time:      time.Now().UTC(),
+		Type:      events.TypeSnapshot,
+		SessionID: sessionID,
+		Data:      h.server.snapshot([]string{sessionID}, at),
+	})
 }
 
 // match reports whether an event is in scope for this connection.

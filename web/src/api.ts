@@ -119,6 +119,53 @@ interface SendOptions {
   readonly signal?: AbortSignal;
 }
 
+/**
+ * How long a read may keep being retried while the gateway is being replaced.
+ *
+ * A redeploy is a *fast* failure for anything talking to it: a connection in
+ * flight gets a FIN or a reset immediately, a connection still in the accept
+ * queue is reset, and a new one is refused — none of them waits for a timeout.
+ * A phone that happens to issue a GET in that window would otherwise show an
+ * error for a deployment that is over before the user finishes reading it.
+ *
+ * Only reads are retried. A POST may have been received and acted on before the
+ * connection died, and the honest answer to "did my prompt reach the agent" is
+ * the server's, not a guess: exactly-once for a mutation needs an idempotency
+ * key, which this contract does not have. A retried GET is free; a retried
+ * prompt is a duplicate turn.
+ */
+const RETRY_BUDGET_MS = 1_500;
+const RETRY_BASE_MS = 150;
+
+/** Whether a method may be retried after a failure that reached no handler. */
+function retryableMethod(method: string): boolean {
+  return method === "GET" || method === "HEAD";
+}
+
+/** Whether a status is a gateway that is restarting rather than refusing. */
+function transientStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+/** Sleeps, unless the caller aborts first. */
+function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      window.clearTimeout(timer);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// There is no rate-limit retry here, deliberately: a 429 carries a Retry-After
+// that is measured in seconds, and a client that silently waits that long looks
+// broken while it does it. The caller surfaces the problem instead.
+
 /** Performs one request and returns the parsed body, or throws `ApiError`. */
 async function send(path: string, options: SendOptions): Promise<unknown> {
   const headers = new Headers({ Accept: "application/json, application/problem+json" });
@@ -128,41 +175,70 @@ async function send(path: string, options: SendOptions): Promise<unknown> {
     payload = JSON.stringify(options.body);
   }
 
-  let response: Response;
-  try {
-    response = await fetch(withQuery(`${API_BASE}${path}`, options.query), {
-      method: options.method,
-      headers,
-      credentials: "same-origin",
-      ...(payload === undefined ? {} : { body: payload }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-  } catch (cause) {
-    if (isAbortError(cause)) throw cause;
-    // A transport failure is not a problem document, but callers should not
-    // have to care which layer failed.
-    throw new ApiError(null, 0, ERROR_CODES.network, "network request failed");
-  }
+  const deadline = Date.now() + RETRY_BUDGET_MS;
+  let attempt = 0;
 
-  const text = await response.text();
-  let raw: unknown = null;
-  if (text !== "") {
+  for (;;) {
+    let response: Response;
     try {
-      raw = JSON.parse(text) as unknown;
-    } catch {
-      raw = null;
+      response = await fetch(withQuery(`${API_BASE}${path}`, options.query), {
+        method: options.method,
+        headers,
+        credentials: "same-origin",
+        ...(payload === undefined ? {} : { body: payload }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+    } catch (cause) {
+      if (isAbortError(cause)) throw cause;
+      // A transport failure is not a problem document, but callers should not
+      // have to care which layer failed.
+      if (retryNow(attempt, deadline, options)) {
+        attempt += 1;
+        await delay(backoff(attempt), options.signal);
+        continue;
+      }
+      throw new ApiError(null, 0, ERROR_CODES.network, "network request failed");
     }
-  }
 
-  if (!response.ok) {
-    throw new ApiError(
-      decodeProblem(raw),
-      response.status,
-      response.status === 401 ? ERROR_CODES.unauthenticated : `http_${response.status}`,
-      `request failed with ${response.status}`,
-    );
+    const text = await response.text();
+    let raw: unknown = null;
+    if (text !== "") {
+      try {
+        raw = JSON.parse(text) as unknown;
+      } catch {
+        raw = null;
+      }
+    }
+
+    if (!response.ok) {
+      if (transientStatus(response.status) && retryNow(attempt, deadline, options)) {
+        attempt += 1;
+        await delay(backoff(attempt), options.signal);
+        continue;
+      }
+      throw new ApiError(
+        decodeProblem(raw),
+        response.status,
+        response.status === 401 ? ERROR_CODES.unauthenticated : `http_${response.status}`,
+        `request failed with ${response.status}`,
+      );
+    }
+    return raw;
   }
-  return raw;
+}
+
+/** Whether another attempt is both allowed and still inside the budget. */
+function retryNow(attempt: number, deadline: number, options: SendOptions): boolean {
+  if (!retryableMethod(options.method)) return false;
+  if (options.signal?.aborted === true) return false;
+  if (Date.now() >= deadline) return false;
+  return attempt < 4;
+}
+
+/** Equal-jitter backoff, so a hundred phones do not retry in lockstep. */
+function backoff(attempt: number): number {
+  const ceiling = RETRY_BASE_MS * 2 ** (attempt - 1);
+  return ceiling / 2 + Math.random() * (ceiling / 2);
 }
 
 /** Same as `send`, but rejects a 2xx body that does not decode as expected. */

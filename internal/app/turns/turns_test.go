@@ -114,7 +114,8 @@ func (h *fakeHarness) NewSession(context.Context, string) (harness.Session, erro
 func (h *fakeHarness) ResumeSession(context.Context, string, string) (harness.Session, error) {
 	return harness.Session{}, nil
 }
-func (h *fakeHarness) CloseSession(context.Context, string) error { return nil }
+func (h *fakeHarness) CloseSession(context.Context, string) error   { return nil }
+func (h *fakeHarness) ReleaseSession(context.Context, string) error { return nil }
 func (h *fakeHarness) SetConfigOption(context.Context, string, string, string) ([]harness.ConfigOption, error) {
 	return nil, nil
 }
@@ -402,7 +403,7 @@ func TestCancelledTurnSettlesAsCancelledNotFailed(t *testing.T) {
 	h := newFakeHarness()
 	h.fail = errors.New("the turn was interrupted")
 	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	if _, err := s.Submit(context.Background(), "session-1", nil); err != nil {
@@ -432,7 +433,7 @@ func TestCancelledTurnSettlesAsCancelledNotFailed(t *testing.T) {
 func TestDropRemovesOneQueuedPromptAndRepublishesPositions(t *testing.T) {
 	h := newFakeHarness()
 	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	if _, err := s.Submit(context.Background(), "session-1", nil); err != nil {
@@ -516,7 +517,7 @@ func TestSettledTurnReleasesTheSession(t *testing.T) {
 func TestTurnTimeoutFailsTheTurn(t *testing.T) {
 	h := newFakeHarness()
 	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4, Timeout: 20 * time.Millisecond})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	if _, err := s.Submit(context.Background(), "session-1", nil); err != nil {
@@ -553,7 +554,7 @@ func codeOf(t *testing.T, err error) string {
 func TestAdmittedPromptIsEchoedAndBusyIsAnnounced(t *testing.T) {
 	h := newFakeHarness()
 	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	blocks := []harness.PromptBlock{
@@ -619,7 +620,7 @@ func TestAdmittedPromptIsEchoedAndBusyIsAnnounced(t *testing.T) {
 func TestQueuedPromptIsEchoedToo(t *testing.T) {
 	h := newFakeHarness()
 	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	if _, err := s.Submit(context.Background(), "session-1", []harness.PromptBlock{{Type: "text", Text: "first"}}); err != nil {

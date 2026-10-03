@@ -154,7 +154,7 @@ func (f *fixture) watcherWithStore(t *testing.T, owned func(string) bool) (*sess
 	}
 	t.Cleanup(store.Close)
 
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	t.Cleanup(sub.Close)
 
 	watcher, err := sessionwatch.New(sessionwatch.Options{

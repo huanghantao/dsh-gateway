@@ -75,7 +75,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // handleReadyz reports whether the harness is usable.
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
-	ready := s.deps.Ready != nil && s.deps.Ready()
+	// Draining is reported as not-ready: the deploy script polls this endpoint
+	// to learn when the old process has gone, and a gateway that is still
+	// finishing a turn must not answer "ready" to a question it is asked in
+	// order to replace it. The harness is unaffected and is reported separately.
+	draining := s.deps.Lifecycle != nil && s.deps.Lifecycle.Draining()
+	ready := s.deps.Ready != nil && s.deps.Ready() && !draining
 	status := http.StatusOK
 	state := "ready"
 	if !ready {
@@ -90,7 +95,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		"droppedEvents": s.deps.Bus.Dropped(),
 	}
 	if !ready {
-		body["detail"] = "the harness process has not completed its handshake"
+		switch {
+		case draining:
+			body["detail"] = "the gateway is draining for a redeploy"
+			body["draining"] = true
+		default:
+			body["detail"] = "the harness process has not completed its handshake"
+		}
 	}
 	_ = httpcore.RespondJSON(w, status, body)
 }

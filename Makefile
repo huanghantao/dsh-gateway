@@ -9,6 +9,11 @@ SHELL := /bin/bash
 
 BINARY      := dsh-gateway
 CMD         := ./cmd/dsh-gateway
+# The agent host is a second binary, not a mode of the first: it is a peer
+# process with its own launchd job, because a host spawned by the gateway would
+# be killed by the gateway's own redeploy.
+HOST_BINARY := dsh-agent-host
+HOST_CMD    := ./cmd/dsh-agent-host
 BIN_DIR     := bin
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
@@ -37,11 +42,13 @@ $(WEB_STAMP): $(shell find $(WEB_DIR)/src $(WEB_DIR)/index.html -type f 2>/dev/n
 web: $(WEB_STAMP) ## Build the embedded web app.
 
 .PHONY: build
-build: web ## Build the gateway binary into bin/.
+build: web ## Build both binaries into bin/.
 	@echo "==> building $(BINARY) $(VERSION)"
 	@mkdir -p $(BIN_DIR)
 	@go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) $(CMD)
+	@go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(HOST_BINARY) $(HOST_CMD)
 	@echo "    $(BIN_DIR)/$(BINARY)  $$(du -h $(BIN_DIR)/$(BINARY) | cut -f1)"
+	@echo "    $(BIN_DIR)/$(HOST_BINARY)  $$(du -h $(BIN_DIR)/$(HOST_BINARY) | cut -f1)"
 
 .PHONY: install
 install: build ## Install the binary into GOBIN (or GOPATH/bin).
@@ -66,6 +73,10 @@ test-llm: web ## Run the opt-in tests that make a real model call (costs money).
 e2e: ## Drive the real PWA in real Chrome against a running gateway (needs one running).
 	@command -v node >/dev/null || { echo "node is required"; exit 1; }
 	@node scripts/e2e-browser.mjs
+
+.PHONY: e2e-host
+e2e-host: ## Build both binaries and exercise the two-tier deployment surface.
+	@bash scripts/e2e-agent-host.sh
 
 .PHONY: cover
 cover: web ## Write a coverage profile and print the total.

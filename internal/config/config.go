@@ -97,6 +97,15 @@ type Log struct {
 
 // DSH describes the managed DeepSeek Harness child process.
 type DSH struct {
+	// Mode is accepted and ignored.
+	//
+	// It used to select between running the harness child in the agent host and
+	// running it in this process. The second option was removed — a gateway that
+	// runs the agent itself loses whatever turn is in flight when it is
+	// redeployed, because DeepSeek Harness binds an ACP child to its client's
+	// stdin — and the key is kept only so that an old config produces a sentence
+	// rather than a silent change in behaviour.
+	Mode string `yaml:"mode,omitempty"`
 	// Binary is the dsh executable. Looked up on PATH when not absolute.
 	Binary string `yaml:"binary"`
 	// Home is the DSH_HOME handed to the child; must match the desktop install
@@ -196,6 +205,19 @@ type Session struct {
 	EventBuffer int `yaml:"eventBuffer"`
 	// ReplayBuffer is how many recent events are retained for reconnect replay.
 	ReplayBuffer int `yaml:"replayBuffer"`
+	// DeployDrainTimeout is how long a shutdown waits for in-flight turns before
+	// going ahead without them.
+	//
+	// It exists because a redeploy and a turn have incompatible clocks: a turn
+	// runs for minutes and a deploy wants to be over in seconds. Refusing to
+	// wait abandons work the operator asked for; waiting forever means a stuck
+	// turn blocks every future deploy. This is the compromise, and it is
+	// deliberately much longer than limits.shutdownTimeout — that one bounds
+	// cleaning up, this one bounds finishing.
+	//
+	// Zero means do not wait at all, which is what an operator who wants a
+	// redeploy to be instantaneous asks for.
+	DeployDrainTimeout Duration `yaml:"deployDrainTimeout"`
 }
 
 // Limits bounds request handling.
@@ -414,6 +436,7 @@ func Default() Config {
 			Home:              "~/.dsh",
 			Profile:           "acp",
 			SandboxMode:       SandboxWorkspaceWrite,
+			Mode:              DSHModeAgentHost,
 			StartTimeout:      Duration(90 * time.Second),
 			StopTimeout:       Duration(15 * time.Second),
 			RestartBackoff:    Duration(1 * time.Second),
@@ -438,6 +461,10 @@ func Default() Config {
 			PromptQueueDepth: 4,
 			EventBuffer:      256,
 			ReplayBuffer:     1024,
+			// Two minutes is long enough for the common case — a turn that is
+			// nearly done — and short enough that an operator redeploying at a
+			// terminal is not left wondering whether it hung.
+			DeployDrainTimeout: Duration(2 * time.Minute),
 		},
 		Limits: Limits{
 			// 8 MiB rather than the 1 MiB a text-only prompt needed: a phone
@@ -642,6 +669,22 @@ func (c Config) ValidateWorkspaces() error {
 }
 
 // SessionsDir returns the effective session-log root.
+// SocketPath is where the agent host listens, and where this gateway looks for
+// it. It is derived from the state directory so that the two ends cannot be
+// configured to disagree — a mismatch there is a silent "host unavailable" that
+// looks exactly like a host that is not running.
+func (c Config) SocketPath() string {
+	return filepath.Join(c.StateDir, AgentHostSocket)
+}
+
+// AgentHostSocket is the socket's file name inside the state directory.
+const AgentHostSocket = "agent-host.sock"
+
+// DSHModeAgentHost is the only value `dsh.mode` accepts. It exists so that a
+// config written by the installer, or by someone following the documentation,
+// reads as a deliberate statement rather than a line that does nothing.
+const DSHModeAgentHost = "agent-host"
+
 func (c Config) SessionsDir() string {
 	if c.Transcript.SessionsDir != "" {
 		return c.Transcript.SessionsDir
@@ -707,6 +750,17 @@ func (c Config) Validate() error {
 		fail("dsh.sandboxMode: unknown mode %q; expected one of %s, %s, %s",
 			c.DSH.SandboxMode, SandboxReadOnly, SandboxWorkspaceWrite, SandboxFullAccess)
 	}
+	if c.DSH.Mode != "" && c.DSH.Mode != DSHModeAgentHost {
+		// A config that names the removed mode must say so rather than be
+		// silently accepted. `in-process` was a real setting, and an operator who
+		// chose it is owed a sentence explaining that it is gone and why — not a
+		// gateway that starts anyway and behaves differently from what their file
+		// asks for.
+		fail("dsh.mode: %q is no longer supported. The agent always runs in the agent "+
+			"host, because a gateway that runs the agent itself loses whatever turn is in "+
+			"flight when it is redeployed. Remove the line, or set it to %q.",
+			c.DSH.Mode, DSHModeAgentHost)
+	}
 	if c.DSH.StartTimeout <= 0 {
 		fail("dsh.startTimeout: must be positive")
 	}
@@ -760,6 +814,10 @@ func (c Config) Validate() error {
 	if c.Session.IdleTimeout <= 0 {
 		fail("session.idleTimeout: must be positive; without it a resumed session " +
 			"would hold DSH's single-writer lock forever and block the desktop")
+	}
+	if c.Session.DeployDrainTimeout < 0 {
+		fail("session.deployDrainTimeout: must not be negative; zero means a " +
+			"shutdown does not wait for running turns at all")
 	}
 	if c.Session.PromptTimeout <= 0 {
 		fail("session.promptTimeout: must be positive")

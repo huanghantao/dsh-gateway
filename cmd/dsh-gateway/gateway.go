@@ -10,13 +10,17 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/huanghantao/dsh-gateway/internal/agenthost"
+	"github.com/huanghantao/dsh-gateway/internal/agenthost/hostlink"
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/bridge"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
@@ -25,9 +29,9 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/curation"
 	"github.com/huanghantao/dsh-gateway/internal/edge"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
-	"github.com/huanghantao/dsh-gateway/internal/harness/acp"
 	"github.com/huanghantao/dsh-gateway/internal/httpapi/v1"
 	"github.com/huanghantao/dsh-gateway/internal/httpcore"
+	"github.com/huanghantao/dsh-gateway/internal/idgen"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 	"github.com/huanghantao/dsh-gateway/internal/pairing"
 	"github.com/huanghantao/dsh-gateway/internal/push"
@@ -103,7 +107,7 @@ func runGateway(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return serve(ctx, cfg, logger)
+	return serve(ctx, cfg, configPath, logger)
 }
 
 // resolveConfig applies the precedence chain and validates the result. It also
@@ -190,7 +194,10 @@ func resolveConfig(flags runFlags) (config.Config, string, error) {
 // serve is the composition root: every dependency is constructed here, in
 // dependency order, and passed down explicitly. Nothing reaches for a global, so
 // the whole wiring is readable in one place and a test can build any subset.
-func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
+// serve runs the gateway. configPath is passed in rather than re-derived so
+// that an error message can name the file the operator is actually editing —
+// the same reason resolveConfig returns it.
+func serve(ctx context.Context, cfg config.Config, configPath string, logger *logx.Logger) error {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
@@ -237,6 +244,11 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		Queue:  cfg.Session.EventBuffer,
 	})
 
+	// The gateway's own operational state. It is built with the bus because
+	// entering the draining state is something connected clients are told about,
+	// and everything that admits work consults it.
+	life := lifecycle.New(bus, logger)
+
 	// The bridge is the update sink, so it is built before the adapter that
 	// publishes into it.
 	updates := bridge.New(bus, cfg.Limits)
@@ -250,27 +262,75 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 	})
 	defer approvalsBroker.Close()
 
-	adapter, err := acp.New(acp.Options{
-		Binary:            cfg.DSH.Binary,
-		Profile:           cfg.DSH.Profile,
-		Home:              cfg.DSH.Home,
-		SandboxMode:       cfg.DSH.SandboxMode,
-		ExtraEnv:          cfg.DSH.ExtraEnv,
-		StartTimeout:      cfg.DSH.StartTimeout.Std(),
-		StopTimeout:       cfg.DSH.StopTimeout.Std(),
-		RestartBackoff:    cfg.DSH.RestartBackoff.Std(),
-		MaxRestartBackoff: cfg.DSH.MaxRestartBackoff.Std(),
-		ApprovalTimeout:   cfg.Session.ApprovalTimeout.Std(),
-		Logger:            logger,
-		Updates:           updates,
-		Permissions:       approvalsBroker,
-		States:            updates,
-	})
+	// The listening socket is claimed before anything else, and the order is
+	// load-bearing rather than tidy.
+	//
+	// It was the other way round, and a second gateway — a deploy overlap, a
+	// stray `run` from a shell — would connect to the agent host *first*, take
+	// the control connection from the gateway that was serving the phone, and
+	// only then discover that the port was taken and exit. The live gateway was
+	// left displaced and reconnecting, twice per redeploy, for no reason at all.
+	//
+	// The port is the resource only one process can hold. Claiming it first
+	// makes single-instance a property of the operating system rather than of
+	// everyone remembering to be careful, and it fails before any shared state
+	// has been touched.
+	listener, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot listen on %s: %w\n"+
+			"       Another gateway is probably already serving this deployment. "+
+			"Check with:\n"+
+			"         launchctl print gui/$(id -u)/dev.dsh-gateway.gateway | grep pid\n"+
+			"         lsof -nP -iTCP:%s -sTCP:LISTEN",
+			cfg.Listen, err, strings.TrimPrefix(cfg.Listen, "127.0.0.1:"))
 	}
+	defer func() { _ = listener.Close() }()
+	logger.Info("listening socket claimed", "listen", cfg.Listen, "pid", os.Getpid())
 
-	var harnessDriver harness.Harness = adapter
+	// The agent runs in the agent host, always. This gateway is a client of it,
+	// and there is deliberately no way to run the child in this process — which
+	// is the difference that makes a redeploy a reconnect rather than the end of
+	// whatever turn was in flight.
+	//
+	// There was one, briefly: a `dsh.mode: in-process` switch that spawned the
+	// ACP child here instead. It was removed because it was a switch back to the
+	// behaviour this architecture exists to eliminate, and a switch like that is
+	// not insurance. It is what
+	// an operator reaches for at 2am when the host will not start, which is
+	// precisely the moment it would quietly reintroduce the bug, and it cannot
+	// even serve as a fallback: DSH's single-writer lock belongs to the host, so
+	// a second writer could not take over a session anyway.
+	//
+	// What replaces it is a refusal that names the fix. The wait below is
+	// bounded, and a gateway that cannot reach its host says so and stops,
+	// rather than appearing to work.
+	socketPath := cfg.SocketPath()
+	instanceID := idgen.New("gw")
+	harnessDriver := agenthost.NewClient(agenthost.ClientOptions{
+		// A wait, not a refusal at the first attempt: a supervisor may start
+		// this job before the host's, and a gateway that would not come up for
+		// that reason is a deployment that only works when two jobs happen to
+		// start in the right order.
+		Dial: func(ctx context.Context) (net.Conn, error) {
+			return hostlink.Dial(ctx, socketPath, cfg.DSH.StartTimeout.Std())
+		},
+		InstanceID:          instanceID,
+		Logger:              logger,
+		StateSink:           updates,
+		Updates:             updates,
+		Permissions:         approvalsBroker,
+		ReconnectBackoff:    cfg.DSH.RestartBackoff.Std(),
+		MaxReconnectBackoff: cfg.DSH.MaxRestartBackoff.Std(),
+	})
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Limits.ShutdownTimeout.Std())
+		defer cancel()
+		if err := harnessDriver.Close(shutdownCtx); err != nil {
+			logger.Warn("could not close the agent host connection", "error", err.Error())
+		}
+	}()
+	logger.Info("driving the agent through the agent host",
+		"socket", socketPath, "instance", instanceID)
 
 	// The scheduler is built before the lease because the lease asks it whether
 	// a session is mid-turn. The dependency runs one way: the scheduler knows
@@ -494,7 +554,11 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		Resolver:      resolver,
 		Version:       version,
 		StartedAt:     time.Now(),
-		Ready:         func() bool { return adapter.State() == harness.StateReady },
+		Lifecycle:     life,
+		// Readiness is the child's, whichever process is holding it: a client
+		// that cannot reach the host reports a state that is not ready, so this
+		// one expression covers both modes.
+		Ready: func() bool { return harnessDriver.State() == harness.StateReady },
 		// ACP reveals the model catalog only when a session attaches, so it is
 		// remembered between runs: otherwise the picker in the app has nothing
 		// to offer until someone opens a session after every restart.
@@ -557,8 +621,19 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 
 	// --- run ----------------------------------------------------------------
 
-	if err := adapter.Start(ctx); err != nil {
-		return err
+	if err := harnessDriver.Start(ctx); err != nil {
+		// This is the one way the gateway cannot start, and the message has to
+		// be an instruction rather than a symptom: the operator reading it has a
+		// phone that is not working and no other clue.
+		return fmt.Errorf("could not reach the agent host at %s: %w\n"+
+			"       The gateway does not run the agent itself; it drives the process that does.\n"+
+			"       Start it, or reinstall both jobs:\n"+
+			"         %s\n"+
+			"         bash deploy/mac/install.sh --server <vps-ip> --public-url <url> --workspaces <paths>\n"+
+			"       If it is already running, ask it what it thinks:\n"+
+			"         dsh-agent-host status -config %s",
+			socketPath, err,
+			"dsh-agent-host serve -config "+configPath, configPath)
 	}
 
 	go leases.Run(ctx)
@@ -614,7 +689,7 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		logger.Warn(warning)
 	}
 
-	logger.Info("gateway listening",
+	logger.Info("gateway serving",
 		"listen", cfg.Listen,
 		"public_url", cfg.PublicURL,
 		"state_dir", cfg.StateDir,
@@ -630,7 +705,10 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Serve, not ListenAndServe: the socket was claimed above, before the
+		// agent host was contacted, and this process is already the only one
+		// that could have it.
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 		close(errCh)
@@ -643,6 +721,25 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		}
 	case <-ctx.Done():
 		logger.Info("shutting down")
+	}
+
+	// Draining comes first, and it is not a formality: it is what stops a new
+	// prompt from being admitted by a process that is about to close the agent
+	// underneath it, and what tells connected clients to move to the successor
+	// before the listener goes away rather than after a failed request.
+	//
+	// A turn already running is given the deploy window to finish. This is the
+	// one place the gateway knowingly trades a longer shutdown for work that
+	// would otherwise be destroyed, which is why the window is its own setting
+	// rather than a reuse of shutdownTimeout.
+	life.Drain(lifecycle.ReasonDeploy)
+	if window := cfg.Session.DeployDrainTimeout.Std(); window > 0 {
+		logger.Info("waiting for in-flight turns", "window", window.String())
+		started := time.Now()
+		idle := lifecycle.WaitFor(ctx, scheduler.BusyAny, window, 250*time.Millisecond)
+		logger.Info("drain finished",
+			"idle", idle,
+			"waited", time.Since(started).Round(time.Millisecond).String())
 	}
 
 	// Shutdown order matters. Stop accepting new work, then refuse pending
@@ -659,10 +756,9 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		logger.Warn("http shutdown did not complete cleanly", "error", err.Error())
 	}
 	approvalsBroker.Close()
-	leases.ReleaseAll(shutdownCtx, "shutdown")         //nolint:contextcheck // see above
-	if err := adapter.Close(shutdownCtx); err != nil { //nolint:contextcheck // see above
-		logger.Warn("harness shutdown did not complete cleanly", "error", err.Error())
-	}
+	leases.ReleaseAll(shutdownCtx, "shutdown") //nolint:contextcheck // see above
+	// The harness is closed by the deferred call that matches the mode this
+	// process started in; see the switch above.
 	return nil
 }
 

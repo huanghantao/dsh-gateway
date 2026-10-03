@@ -6,9 +6,14 @@
  * those kills the socket without an error frame. So the client owns four
  * behaviours:
  *
- * - **Resume by sequence.** `since=<last seq seen>` lets the server replay the
- *   ring buffer, so a reconnect is not a lost turn. The counter only ever moves
- *   forward, across connections, which is what the contract asks for.
+ * - **Resume by cursor.** `since=<last seq seen>` plus `generation=<the sequence
+ *   space it belongs to>` lets the server replay the ring buffer, so a reconnect
+ *   is not a lost turn. Both halves are sent, because a sequence number alone is
+ *   meaningless after a redeploy: the new process numbers its events from one
+ *   again, so the client's bookmark is *ahead* of a stream it has never seen. The
+ *   server answers that with `resync` and a `snapshot`, and this class answers a
+ *   changed generation by declaring its view stale rather than by waiting for a
+ *   gap it cannot detect.
  * - **Equal-jitter backoff.** Half the delay is fixed, half is random, capped
  *   at 10s. Pure doubling would resynchronise every phone that dropped together
  *   after a gateway restart.
@@ -57,6 +62,22 @@ export class EventClient {
 
   #socket: WebSocket | null = null;
   #lastSeq = -1;
+  /**
+   * The sequence space `#lastSeq` is a position in, from the last `hello`. Empty
+   * until the first one arrives, which is why the first connection never claims a
+   * position it cannot justify.
+   */
+  #streamGeneration = "";
+  /**
+   * The position a snapshot already described. A snapshot is taken while the
+   * subscription that feeds us is live, so frames from the overlap can arrive
+   * right behind it — already reflected in what the snapshot said. Applying them
+   * again is mostly harmless (every frame is idempotent) and occasionally is not:
+   * a duplicate `turn.state` for a settled turn appends a second notice to the
+   * conversation. Anything at or below this is therefore dropped, which is the
+   * same rule the server applies when it takes the snapshot.
+   */
+  #snapshotSeq = -1;
   #attempt = 0;
   #retryTimer = 0;
   #heartbeatTimer = 0;
@@ -72,6 +93,11 @@ export class EventClient {
   /** The last `seq` observed, or -1 before the first frame. */
   get lastSeq(): number {
     return this.#lastSeq;
+  }
+
+  /** The sequence space the bookmark belongs to; empty before the first `hello`. */
+  get streamGeneration(): string {
+    return this.#streamGeneration;
   }
 
   // There is deliberately no connect() alongside wake().
@@ -100,6 +126,8 @@ export class EventClient {
   reset(detail: string | null): void {
     this.#subscriptions.clear();
     this.#lastSeq = -1;
+    this.#streamGeneration = "";
+    this.#snapshotSeq = -1;
     this.#attempt = 0;
     // The next connection is a first connection for a new principal: the app
     // bootstraps after pairing, so it must not also be told its view is stale.
@@ -133,6 +161,9 @@ export class EventClient {
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(`${API_BASE}/events`, `${scheme}//${window.location.host}`);
     if (this.#lastSeq >= 0) url.searchParams.set("since", String(this.#lastSeq));
+    if (this.#streamGeneration !== "") {
+      url.searchParams.set("generation", this.#streamGeneration);
+    }
     return url.toString();
   }
 
@@ -182,7 +213,31 @@ export class EventClient {
       // Unknown frame types are ignored on purpose: a newer server must be able
       // to add one without breaking an already-installed PWA.
       if (decoded === null) return;
-      if (decoded.seq > this.#lastSeq) this.#lastSeq = decoded.seq;
+
+      if (decoded.type === "hello") {
+        // The handshake names the sequence space this connection speaks. When it
+        // is not the one the bookmark belongs to, the gateway was replaced while
+        // this page was open: the bookmark is a position in a stream that no
+        // longer exists, and the frames about to arrive are numbered from one
+        // again. Waiting for a gap is useless — the gap is invisible, because
+        // every new sequence number is *below* the stale bookmark. So the client
+        // forgets the position and asks the server, through a resync, to tell it
+        // what the state is.
+        if (this.#streamGeneration !== "" && decoded.data.generation !== this.#streamGeneration) {
+          this.#lastSeq = -1;
+          this.#snapshotSeq = -1;
+          this.#handlers.onStale?.("the gateway restarted");
+        }
+        this.#streamGeneration = decoded.data.generation;
+      } else {
+        if (decoded.type === "snapshot" && decoded.seq > this.#snapshotSeq) {
+          this.#snapshotSeq = decoded.seq;
+        } else if (decoded.seq <= this.#snapshotSeq) {
+          // Already covered by the snapshot that arrived ahead of it.
+          return;
+        }
+        if (decoded.seq > this.#lastSeq) this.#lastSeq = decoded.seq;
+      }
       this.#handlers.onEvent(decoded);
     });
 

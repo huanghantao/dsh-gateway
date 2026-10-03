@@ -33,7 +33,18 @@ log:
   addSource: false
 
 dsh:
-  # Looked up on PATH, which is why the launchd job sets PATH explicitly (see
+  # Where the agent runs. There is one answer, and it is stated here rather than
+  # left implicit so that the file says what is true.
+  #
+  # The agent runs in a separate, long-lived process — dev.dsh-gateway.agent-host
+  # — which holds the DeepSeek Harness child, its sessions and its turns. The
+  # gateway drives it over a socket and can be redeployed without interrupting
+  # any of that. Running the child inside the gateway is not an option: DeepSeek
+  # Harness binds an ACP child to its client's stdin, so a gateway that ran the
+  # agent itself would end whatever turn was in flight every time it was
+  # replaced.
+  mode: "agent-host"
+  # Looked up on PATH, which is why the launchd jobs set PATH explicitly (see
   # dev.dsh-gateway.gateway.plist) — launchd's default PATH would not find a
   # node/nvm-installed `dsh`. Put an absolute path here instead if you prefer.
   binary: "dsh"

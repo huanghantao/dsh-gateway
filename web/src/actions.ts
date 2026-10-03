@@ -12,8 +12,10 @@
  *   the request and let frames update the store, except where the contract
  *   gives no echo (there is no `session.message` for a user turn, so the local
  *   bubble is appended only after the server accepts the prompt).
- * - **`resync` refetches.** It is the one frame that says the client's view is
- *   no longer trustworthy.
+ * - **`resync` refetches, `snapshot` repairs.** A `resync` says the client's
+ *   view is no longer trustworthy; the `snapshot` that follows says what the
+ *   state actually is. The first recovers history the client never received,
+ *   the second recovers the present it can no longer infer.
  */
 
 import { ApiError, ERROR_CODES, api, isAbortError } from "./api.js";
@@ -42,6 +44,7 @@ import type {
   ServerEvent,
   Session,
   SessionChanges,
+  SessionTurnSnapshot,
   SessionReceipt,
   TokenUsage,
   TranscriptItem,
@@ -85,6 +88,29 @@ function grantedNotice(granted: ApprovalGranted): string {
   const tool = granted.tool === "" ? "A tool" : granted.tool;
   const scope = granted.grant.scope === "exact" ? "this exact call" : `${tool} in this session`;
   return `Auto-approved by your standing grant: ${scope}.`;
+}
+
+/**
+ * Applies a snapshot's turn state to the open conversation.
+ *
+ * A session absent from the snapshot has no turn, and that absence is a claim
+ * the snapshot can make and the event stream cannot — which is the whole point
+ * of it. It is therefore applied as a replacement rather than as a merge: a
+ * client that had a stale `running` turn for a session the server says is idle
+ * would otherwise keep showing Stop for work that ended while it was away.
+ */
+function applySnapshot(
+  active: ActiveSession | null,
+  turns: readonly SessionTurnSnapshot[],
+  openSessionId: string | null,
+): ActiveSession | null {
+  if (active === null || openSessionId === null) return active;
+  const entry = turns.find((item) => item.sessionId === openSessionId);
+  return {
+    ...active,
+    turn: entry?.running ?? null,
+    queue: entry?.queued ?? [],
+  };
 }
 
 /** Inserts or replaces a queued turn, keeping the queue in position order. */
@@ -802,11 +828,41 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         return;
 
       case "resync":
-        // The server dropped frames for this client. Everything it shows is
-        // suspect, including the conversation.
+        // The server could not honour this client's cursor — a redeploy, a gap
+        // it fell behind, or a bookmark from a process that is gone. Everything
+        // it shows is suspect, including the conversation.
+        //
+        // The refetch is issued here rather than deferred to the `snapshot` that
+        // follows because the two answer different questions: the snapshot says
+        // what is happening *now* (a running turn, a queue, a decision waiting),
+        // and this says what has *happened* (rows the client never received).
+        // Only the transcript server can answer the second.
         void loadApprovals();
         void loadSessions();
         refetchConversation();
+        return;
+
+      case "snapshot": {
+        // The present state, as the server sees it. Applied in place so that a
+        // client which cannot prove its stream was continuous shows the truth
+        // immediately rather than after its refetches land.
+        const active = store.state.active;
+        const turns = event.data.turns;
+        store.set((state) => ({
+          ...state,
+          harness: event.data.harness,
+          approvals: event.data.approvals,
+          active: applySnapshot(state.active, turns, active?.sessionId ?? null),
+        }));
+        return;
+      }
+
+      case "gateway.draining":
+        // The gateway is being replaced, not failing: a turn that is running
+        // keeps running, and this page will reconnect to its successor. It is
+        // surfaced as a notice because a silent freeze during a deploy is
+        // indistinguishable from a hang.
+        store.patch({ notice: "The gateway is restarting; a running turn continues." });
         return;
 
       case "session.state": {

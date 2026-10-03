@@ -31,15 +31,12 @@ func TestSubscribeReplayIsBoundedByQueueDepth(t *testing.T) {
 	}
 
 	done := make(chan struct{})
-	var (
-		sub           *Subscription
-		replayMissing bool
-	)
+	var resumed Resume
 	go func() {
 		defer close(done)
-		// since=1 asks for every event after the first: 99 of them, far more
-		// than the channel can hold.
-		sub, replayMissing = bus.Subscribe(1, nil)
+		// A cursor at 1 asks for every event after the first: 99 of them, far
+		// more than the channel can hold.
+		resumed = bus.Subscribe(Cursor{Generation: bus.Generation(), Seq: 1}, nil)
 	}()
 
 	select {
@@ -47,11 +44,12 @@ func TestSubscribeReplayIsBoundedByQueueDepth(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Subscribe blocked: the replay batch is not bounded by the queue depth")
 	}
+	sub := resumed.Subscription
 	defer sub.Close()
 
-	if !replayMissing {
-		t.Error("replayMissing = false, but the replay was truncated; the client would " +
-			"render an incomplete stream with no indication anything was lost")
+	if resumed.Resumable() {
+		t.Error("the resume was reported as complete, but the replay was truncated; the " +
+			"client would render an incomplete stream with no indication anything was lost")
 	}
 
 	// The retained events must be the newest ones, because that is what the
@@ -92,11 +90,16 @@ func TestSubscribeReplaysRetainedEvents(t *testing.T) {
 		bus.Publish(TypeSessionMessage, "s1", map[string]any{"n": i})
 	}
 
-	sub, missing := bus.Subscribe(3, nil)
+	resumed := bus.Subscribe(Cursor{Generation: bus.Generation(), Seq: 3}, nil)
+	sub := resumed.Subscription
 	defer sub.Close()
 
-	if missing {
-		t.Error("replayMissing = true, but every requested event was still retained")
+	if !resumed.Resumable() {
+		t.Errorf("resume reported %q, but every requested event was still retained",
+			resumed.Reason)
+	}
+	if resumed.From != 3 {
+		t.Errorf("resumed from %d, want 3", resumed.From)
 	}
 
 	var seqs []uint64
@@ -127,11 +130,89 @@ func TestSubscribeReportsCursorOlderThanRing(t *testing.T) {
 		bus.Publish(TypeSessionMessage, "s1", nil)
 	}
 
-	sub, missing := bus.Subscribe(1, nil)
-	defer sub.Close()
+	resumed := bus.Subscribe(Cursor{Generation: bus.Generation(), Seq: 1}, nil)
+	defer resumed.Subscription.Close()
 
-	if !missing {
-		t.Error("replayMissing = false, but the requested cursor fell off the ring")
+	if resumed.Resumable() {
+		t.Error("the resume was reported as complete, but the requested cursor fell off the ring")
+	}
+	if resumed.Reason != ResyncWindowExceeded {
+		t.Errorf("reason = %q, want %q", resumed.Reason, ResyncWindowExceeded)
+	}
+}
+
+// TestSubscribeFencesACursorFromAnotherGeneration is the regression test for the
+// silent failure this contract exists to prevent.
+//
+// The sequence space belongs to one run of the process. A client that was on
+// `seq: 900` when the gateway restarted reconnects with the cursor it holds and
+// no generation, or with a generation that is no longer ours. The old code
+// asked "is this cursor older than what I still hold?" — a question whose answer
+// is no — and handed back a connection that looked healthy while delivering
+// frames the client would discard as stale, because every new sequence number is
+// lower than the one it bookmarked. The client never learned to refetch.
+//
+// Every unusable cursor must now produce the same answer: a resync, with a
+// reason, and a snapshot.
+func TestSubscribeFencesACursorFromAnotherGeneration(t *testing.T) {
+	first := New(Config{Replay: 64, Queue: 64})
+	for i := 0; i < 900; i++ {
+		first.Publish(TypeSessionMessage, "s1", nil)
+	}
+
+	// The same client's cursor, against the process that replaced the one it was
+	// talking to.
+	restarted := New(Config{Replay: 64, Queue: 64, Generation: "second-run"})
+
+	cases := []struct {
+		name   string
+		cursor Cursor
+		want   ResyncReason
+	}{
+		{
+			name:   "a cursor from the previous generation",
+			cursor: Cursor{Generation: first.Generation(), Seq: 900},
+			want:   ResyncGenerationChanged,
+		},
+		{
+			name:   "a stale cursor with no generation at all",
+			cursor: Cursor{Seq: 900},
+			want:   ResyncAheadOfStream,
+		},
+		{
+			name:   "a first connection",
+			cursor: Cursor{},
+			want:   ResyncNoCursor,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resumed := restarted.Subscribe(tc.cursor, nil)
+			defer resumed.Subscription.Close()
+			if resumed.Resumable() {
+				t.Fatalf("the resume was reported as complete for %s; the client would sit "+
+					"on a healthy-looking socket discarding every frame", tc.name)
+			}
+			if resumed.Reason != tc.want {
+				t.Errorf("reason = %q, want %q", resumed.Reason, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubscribeResumesWithinItsOwnGeneration pins the other half: a cursor from
+// *this* run, including one that has fallen off the ring, must never be mistaken
+// for a restart.
+func TestSubscribeResumesWithinItsOwnGeneration(t *testing.T) {
+	bus := New(Config{Replay: 64, Queue: 64})
+	for i := 0; i < 3; i++ {
+		bus.Publish(TypeSessionMessage, "s1", nil)
+	}
+
+	resumed := bus.Subscribe(Cursor{Generation: bus.Generation(), Seq: 3}, nil)
+	defer resumed.Subscription.Close()
+	if !resumed.Resumable() {
+		t.Fatalf("resume of a live cursor reported %q", resumed.Reason)
 	}
 }
 
@@ -148,10 +229,10 @@ func TestFilteredSubscriptionGetsOnlyItsSessions(t *testing.T) {
 		bus.Publish(TypeSessionMessage, session, map[string]any{"n": i})
 	}
 
-	sub, _ := bus.Subscribe(0, func(e Event) bool {
+	sub := bus.Subscribe(Cursor{Generation: bus.Generation()}, func(e Event) bool {
 		// Gateway-wide events (empty session) are always relevant.
 		return e.SessionID == "" || e.SessionID == "s1"
-	})
+	}).Subscription
 	defer sub.Close()
 
 	bus.Publish(TypeSessionMessage, "s2", nil)
@@ -180,7 +261,7 @@ func TestSlowSubscriberIsDroppedNotBlocked(t *testing.T) {
 	bus := New(Config{Replay: 16, Queue: 4})
 
 	// This subscriber never reads from Events().
-	slow, _ := bus.Subscribe(0, nil)
+	slow := bus.Subscribe(Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer slow.Close()
 
 	done := make(chan struct{})
@@ -202,16 +283,16 @@ func TestSlowSubscriberIsDroppedNotBlocked(t *testing.T) {
 		t.Error("Dropped() = 0 after overflowing a subscriber's queue; the drop was " +
 			"not accounted for, so an operator could not see backpressure happening")
 	}
-	if !slow.TakeResync() {
-		t.Error("a subscriber that lost events was not flagged for resync; it would " +
-			"render an incomplete stream as if it were complete")
+	if reason := slow.TakeResync(); reason != ResyncFellBehind {
+		t.Errorf("a subscriber that lost events was flagged %q; it would render an "+
+			"incomplete stream as if it were complete", reason)
 	}
 }
 
 // TestCloseIsIdempotentAndPublishAfterCloseIsSafe guards the shutdown path.
 func TestCloseIsIdempotentAndPublishAfterCloseIsSafe(t *testing.T) {
 	bus := New(Config{Replay: 8, Queue: 8})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(Cursor{Generation: bus.Generation()}, nil).Subscription
 
 	sub.Close()
 	sub.Close() // must not panic on the double close
@@ -260,7 +341,7 @@ func TestConcurrentPublishAndSubscribe(t *testing.T) {
 	}()
 
 	for i := 0; i < 20; i++ {
-		sub, _ := bus.Subscribe(uint64(i*3), nil)
+		sub := bus.Subscribe(Cursor{Generation: bus.Generation(), Seq: uint64(i * 3)}, nil).Subscription
 		// Drain whatever was replayed, then leave.
 		select {
 		case <-sub.Events():

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huanghantao/dsh-gateway/internal/agenthost/acp"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
-	"github.com/huanghantao/dsh-gateway/internal/harness/acp"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 )
 

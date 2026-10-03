@@ -220,6 +220,50 @@ func TestValidateAloneDoesNotInspectWorkspaceShape(t *testing.T) {
 	}
 }
 
+// TestTheRemovedInProcessModeIsRefusedRatherThanIgnored guards an upgrade path.
+//
+// `dsh.mode: in-process` was a real setting: it told the gateway to run the
+// DeepSeek Harness child itself, which meant a redeploy ended whatever turn was
+// running. It has been removed, and the danger of removing a setting is the
+// config file that still names it — silently ignored, it would leave an operator
+// believing their gateway behaves one way while it behaves another. So the value
+// is refused, and the refusal explains both what happened and what to do.
+func TestTheRemovedInProcessModeIsRefusedRatherThanIgnored(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.DSH.Mode = "in-process"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("`in-process` was accepted; a config asking to run the agent in the " +
+			"gateway would be silently ignored, and its author would never learn that " +
+			"turns now survive redeploys")
+	}
+	for _, want := range []string{"dsh.mode", "no longer supported", "agent host"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q, so it does not tell the operator "+
+				"what happened or what to do: %v", want, err)
+		}
+	}
+}
+
+func TestTheAgentHostModeIsAcceptedAndMayBeOmitted(t *testing.T) {
+	// Named, because the shipped template names it and a file that is explicit
+	// should validate.
+	named := validConfig(t)
+	named.DSH.Mode = config.DSHModeAgentHost
+	if err := named.Validate(); err != nil {
+		t.Errorf("the documented value was rejected: %v", err)
+	}
+
+	// Absent, because every config written before this setting existed should
+	// keep working — and get the behaviour that does not lose work.
+	absent := validConfig(t)
+	absent.DSH.Mode = ""
+	if err := absent.Validate(); err != nil {
+		t.Errorf("a config without a mode was rejected: %v", err)
+	}
+}
+
 func TestSandboxModeRejectsUnknownValues(t *testing.T) {
 	tests := []struct {
 		name   string

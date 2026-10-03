@@ -121,10 +121,10 @@ func NewNotifier(opts NotifierOptions) (*Notifier, error) {
 
 // Run consumes events until the context is cancelled.
 func (n *Notifier) Run(ctx context.Context) {
-	// Everything, from the beginning of what the ring holds: the notifier has no
-	// bookmark of its own and must not miss an approval because it started a
-	// moment late.
-	sub, _ := n.bus.Subscribe(0, nil)
+	// A zero cursor means "from now". The notifier deliberately does not resume
+	// from the ring: it has no bookmark of its own, and a notification about a
+	// turn that ended before this process started is noise rather than news.
+	sub := n.bus.Subscribe(events.Cursor{}, nil).Subscription
 	defer sub.Close()
 	n.readyOnce.Do(func() { close(n.ready) })
 
@@ -145,6 +145,29 @@ func (n *Notifier) Run(ctx context.Context) {
 func (n *Notifier) Ready() <-chan struct{} { return n.ready }
 
 // handle decides what one event means.
+// turnStart decides when a turn began, for the purpose of "was it long enough
+// to interrupt someone about".
+//
+// The payload's own StartedAt is believed when it is present, and this is not a
+// detail: the notifier is a late observer by nature — it is a subscriber that
+// may attach at any point during a turn — so "the moment I first saw it running"
+// is only the start when the turn began after this process was listening. For a
+// turn already in flight it understates the wait, and worse, it makes the answer
+// depend on when a notification happened to be scheduled. A turn with two
+// minutes of work behind it would be suppressed as "too short to bother you
+// with" if its first running frame was processed a moment before the reader put
+// the phone down.
+//
+// The fallback is for the one producer that legitimately has no start time: the
+// session-log watcher cannot know when a turn it did not start began, which is
+// why the field is optional in the first place.
+func turnStart(state events.TurnState, now func() time.Time) time.Time {
+	if state.StartedAt != nil && !state.StartedAt.IsZero() {
+		return *state.StartedAt
+	}
+	return now()
+}
+
 func (n *Notifier) handle(ctx context.Context, event events.Event) {
 	switch event.Type {
 	case events.TypeTurnState:
@@ -179,7 +202,7 @@ func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 		}
 		n.mu.Lock()
 		if _, known := n.running[event.SessionID]; !known {
-			n.running[event.SessionID] = n.now()
+			n.running[event.SessionID] = turnStart(state, n.now)
 		}
 		n.mu.Unlock()
 

@@ -44,18 +44,13 @@ func decodeTicket(t *testing.T, body string) ticket {
 }
 
 // holdTurn makes the next prompt block until the returned function is called.
+//
+// The gate is owned by the fake and guarded by its lock, because the turn runs
+// on its own goroutine: a gate held in the test's local state would be read and
+// written from two goroutines, which is a race in the test rather than in the
+// code it is testing.
 func holdTurn(ts *testServer) func() {
-	gate := make(chan struct{})
-	ts.driver.promptGate = gate
-	var once bool
-	return func() {
-		if once {
-			return
-		}
-		once = true
-		ts.driver.promptGate = nil
-		close(gate)
-	}
+	return ts.driver.HoldPrompt()
 }
 
 // TestPromptStartsImmediatelyAndSaysSo pins the shape a client relies on: the
@@ -146,8 +141,8 @@ func TestCancelStopsTheTurnAndReportsWhatItDid(t *testing.T) {
 	if !result.Cancelled || result.Dropped != 1 {
 		t.Errorf("result = %+v, want the running turn cancelled and one prompt dropped", result)
 	}
-	if len(ts.driver.cancels) != 1 || ts.driver.cancels[0] != "session-test" {
-		t.Errorf("harness cancels = %v, want one for session-test", ts.driver.cancels)
+	if cancels := ts.driver.cancelCalls(); len(cancels) != 1 || cancels[0] != "session-test" {
+		t.Errorf("harness cancels = %v, want one for session-test", cancels)
 	}
 	release()
 }
@@ -161,8 +156,8 @@ func TestCancelOnAnIdleSessionIsANoOp(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if len(ts.driver.cancels) != 0 {
-		t.Errorf("the harness was asked to cancel %v; nothing was running", ts.driver.cancels)
+	if cancels := ts.driver.cancelCalls(); len(cancels) != 0 {
+		t.Errorf("the harness was asked to cancel %v; nothing was running", cancels)
 	}
 }
 
@@ -190,13 +185,14 @@ func TestImagePromptReachesTheHarness(t *testing.T) {
 	// what makes this a test of the image block rather than of the scheduler's
 	// timing, which is a race the ticket deliberately does not win.
 	deadline := time.Now().Add(2 * time.Second)
-	for len(ts.driver.prompts) == 0 && time.Now().Before(deadline) {
+	for len(ts.driver.promptCalls()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
 	}
-	if len(ts.driver.prompts) != 1 {
-		t.Fatalf("prompts = %d, want one", len(ts.driver.prompts))
+	prompts := ts.driver.promptCalls()
+	if len(prompts) != 1 {
+		t.Fatalf("prompts = %d, want one", len(prompts))
 	}
-	blocks := ts.driver.prompts[0].blocks
+	blocks := prompts[0].blocks
 	if len(blocks) != 2 {
 		t.Fatalf("blocks = %+v, want text and image", blocks)
 	}
@@ -296,7 +292,7 @@ func TestAnEmptyPromptIsRefusedBeforeATurnStarts(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
 	}
-	if len(ts.driver.prompts) != 0 {
+	if len(ts.driver.promptCalls()) != 0 {
 		t.Error("an empty prompt reached the harness")
 	}
 }

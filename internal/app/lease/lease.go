@@ -288,7 +288,7 @@ func (m *Manager) Release(ctx context.Context, sessionID, reason string, force b
 
 	// Close outside the lock: DSH's close is a round trip, and holding the mutex
 	// across it would stall every other session operation.
-	err := m.harness.CloseSession(ctx, sessionID)
+	err := m.harness.ReleaseSession(ctx, sessionID)
 	if err != nil {
 		m.logger.Warn("session close failed", "session", sessionID, "error", err.Error())
 	}

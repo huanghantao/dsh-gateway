@@ -57,7 +57,7 @@ func newBench(t *testing.T, grantTTL time.Duration) *bench {
 		Now:      clk.now,
 	})
 	t.Cleanup(broker.Close)
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	t.Cleanup(sub.Close)
 	return &bench{broker: broker, bus: bus, clock: clk, sub: sub}
 }
@@ -226,7 +226,7 @@ func TestExpiryRefusesAndSaysSo(t *testing.T) {
 		Timeout: 20 * time.Millisecond, Bus: bus, Logger: logx.Discard(),
 	})
 	defer broker.Close()
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 
 	// The wait is bounded by the caller's context, which is how the ACP adapter

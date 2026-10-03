@@ -704,7 +704,20 @@ restart would be one nobody remembers agreeing to.
 One multiplexed stream for every session. Query parameters:
 
 - `since` — replay events after this sequence number. Use the last `seq` seen.
+- `generation` — the sequence space that `seq` belongs to, from the last `hello`.
+  Send it whenever `since` is sent. An older client that sends `since` alone is
+  treated as holding a cursor it cannot justify, which is safe: the answer is a
+  resync and a snapshot rather than a stream that looks continuous and is not.
 - `session` — restrict to one session id. Repeatable; omit for all.
+
+**A cursor is `(generation, seq)`, never a bare `seq`.** The sequence space
+belongs to one run of the process — `seq` starts at zero every start — so a
+number without its generation is not a position. It is what a client holds across
+a redeploy, and against the new process it is *ahead* of a stream it has never
+seen: the frames that arrive are numbered from one again, and a client that
+compared them against its bookmark would discard every one of them while the
+socket stayed open and the heartbeat succeeded. That failure is silent, which is
+why the contract has no such case in it.
 
 Server frames:
 
@@ -714,7 +727,7 @@ Server frames:
 
 | `type` | Meaning |
 |---|---|
-| `hello` | First frame. `data` = `{ "deviceId": …, "replayFrom": … }`. |
+| `hello` | First frame. `data` = `{ "deviceId", "generation", "replayFrom", "serverTime" }`. `generation` names this run's sequence space; echo it on the next reconnect. `replayFrom` is the position the server *actually* resumed from, which is not necessarily the one that was asked for. The frame carries no `seq`: it is a statement about the connection, not a position in the stream. |
 | `session.state` | Session metadata changed (leased, busy, title, model). `busy` is published by whoever can answer it and never by both: the turn scheduler for a session this gateway drives, the log watcher for one the desktop drives. A client keeps its own copy — the composer reads it to decide whether Stop belongs on screen — so a producer that changes the answer must say so. |
 | `session.message` | One row of the conversation: a committed message, or the echo of a prompt this gateway has just admitted — sent to every client, including the one that typed it, which is why the echo has to be reconcilable. `data = { id, role: "user" \| "assistant", text, thinking?, model?, usage?, attachments? }`. `id` matches the transcript item id for the same message, so a client folding live events into fetched history can dedupe exactly rather than by comparing text — **except** for the prompt echo, whose `id` is empty because the session log has not recorded the prompt yet: a client that merges history by id must let the committed row replace the echo rather than adding to it. `role: "user"` means a prompt the client did not type itself: one typed at the desk or in a headless run, or one another client of this gateway sent. `attachments` counts the non-text blocks, so a prompt that was only a screenshot does not render as an empty row. |
 | `session.thought` | A committed reasoning block, shown collapsed. `data = { id, text }`. |
@@ -725,7 +738,9 @@ Server frames:
 | `approval.granted` | A standing grant answered a request, so no prompt was shown. `data = { grant, tool, input }`. It is separate from `approval.resolved` because the two say different things: one is "you decided", this is "a decision you made earlier applied here". |
 | `turn.state` | `data = { turnId, state: "queued" \| "running" \| "completed" \| "cancelled" \| "failed", position?, queueDepth?, queuedAt?, startedAt?, stopReason?, detail? }`. `startedAt` is sent on every state including the settled ones, because a phone that reconnects mid-turn needs the start rather than the duration so far — the event that announced it may be long past the replay window. A queued ticket is republished whenever the queue moves. |
 | `harness.state` | The DSH child process: `data = { state: "starting" \| "ready" \| "restarting" \| "failed", detail? }`. |
-| `resync` | Events were dropped for this subscriber. Refetch transcripts and session metadata. |
+| `resync` | The cursor could not be honoured. `data = { reason }`, where the reason is one of `the gateway restarted`, `cursor is ahead of this gateway`, `replay window exceeded`, `events were dropped for a slow client`. It is always followed by a `snapshot`. A client refetches what it is showing. |
+| `snapshot` | The present state, sent after a `resync` and when a connection first subscribes to a session. `data = { generation, seq, time, harness, turns, approvals }`, where `turns` is one `{ sessionId, running, queued }` per session with a turn and `approvals` is exactly what `GET /approvals` returns. Everything at or below `seq` is already reflected in the snapshot; frames after it are deltas, so a client that applies the snapshot and then accepts only strictly greater sequence numbers converges without a gap and without a duplicate. A session absent from `turns` has no turn — a claim a snapshot can make and an event stream cannot. |
+| `gateway.draining` | The gateway is going away on purpose: a redeploy, not a fault. `data = { reason }`. A turn already running keeps running; the client reconnects to the successor. It is a distinct frame from `harness.state` because it says the opposite about the agent. |
 
 Client frames:
 
@@ -758,13 +773,24 @@ of it: the watcher cannot know when a turn it did not start began, so `startedAt
 is absent on a turn the desk is driving. Everything else in the payload is
 bounded by what the log records.
 
-If `since` is older than the buffer, the server sends `resync` first. A `resync`
-frame carries `seq: 0` because it has no position in the stream — do not bookmark
-it as a resume point.
+Every cursor resolves to exactly one of two answers, and there is no third:
 
-A subscriber that cannot keep up loses the oldest events and receives `resync`
-rather than slowing the agent down. The DSH reader is never blocked by a slow
-phone.
+- **It resumes.** The client receives the events it missed, in order, and
+  continues on the live stream. No control frame is sent.
+- **It cannot be honoured**, for any of four reasons — a different generation, a
+  cursor ahead of this process's watermark, a cursor older than the retained
+  buffer, or no cursor at all on a connection that has connected before. The
+  server sends `resync` (except for a first connection, which has nothing to
+  repair) followed by `snapshot`.
+
+A subscriber that cannot keep up *while connected* loses the oldest events and
+receives `resync` and a snapshot rather than slowing the agent down. The DSH
+reader is never blocked by a slow phone.
+
+A `resync` and a `snapshot` are separate frames on purpose. The `resync` says the
+client's view of *history* is untrustworthy and it should refetch; the `snapshot`
+says what the state *is*, so a phone that reconnected across a redeploy renders
+the truth immediately instead of after three round trips.
 
 ## Session leases
 
@@ -784,6 +810,17 @@ The gateway makes this explicit rather than hiding it:
   prompt in flight.
 - `GET /sessions/{id}` reports `leased`, so a client can explain *why* the desktop
   may refuse to open the session.
+
+Releasing gives up the gateway's *claim*; it does not end the conversation. The
+agent host keeps its handle on the session — and therefore DSH's single-writer
+lock — so an idle timeout is bookkeeping rather than a boundary in the log. This
+is one of the reasons the agent host exists: the only lever DeepSeek Harness
+offers a client for a session it holds is `session/close`, which writes a
+synthetic end to the session's own log, so an implementation without a host has
+to choose between leaking the lock and marking conversations finished.
+
+Either way the lock belongs to whoever holds the session, and the point of the
+release is to hand it back so the desktop can open it.
 
 ## Health
 

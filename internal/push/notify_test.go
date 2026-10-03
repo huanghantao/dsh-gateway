@@ -204,12 +204,19 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 	bus.Publish(events.TypeTurnState, "session-quick", events.TurnState{State: "completed"})
 	waitFor(t, func() bool { return len(rec.received()) == 0 }, "nothing for a quick turn")
 
-	// A long one is.
-	reads := clock.Reads()
-	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{State: "running"})
-	waitFor(t, func() bool { return clock.Reads() > reads }, "the notifier to note the turn's start")
-	clock.Advance(5 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{State: "completed"})
+	// A long one is. Its length is stated rather than simulated: the payload
+	// says when the turn began, which is what the contract sends that field for,
+	// and it is the only way to make this deterministic. The version of this
+	// test that advanced a clock instead had to wait for "the notifier read the
+	// time once" — a condition other code paths also satisfy — so it raced, and
+	// failed two runs in five.
+	longStart := clock.Read().Add(-5 * time.Minute)
+	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{
+		TurnID: "turn-long", State: "running", StartedAt: &longStart,
+	})
+	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{
+		TurnID: "turn-long", State: "completed", StartedAt: &longStart,
+	})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for a long turn")
 	first := rec.received()[0]
@@ -345,11 +352,15 @@ func longTurnBody(t *testing.T, includeName bool, state, title string) string {
 	})
 	<-notifier.Ready()
 
-	reads := clock.Reads()
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: "running"})
-	waitFor(t, func() bool { return clock.Reads() > reads }, "the notifier to note the turn's start")
-	clock.Advance(5 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: state})
+	// As above: the turn's length is stated in the payload rather than simulated
+	// with a clock, so there is nothing to wait for and nothing to race.
+	longStart := clock.Read().Add(-5 * time.Minute)
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{
+		TurnID: "turn-1", State: "running", StartedAt: &longStart,
+	})
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{
+		TurnID: "turn-1", State: state, StartedAt: &longStart,
+	})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for a long turn")
 	return rec.received()[0].Body
@@ -416,6 +427,72 @@ func requestApproval(t *testing.T, bus *events.Bus, sessionID, id, tool string) 
 }
 
 // waitFor polls until condition holds.
+// TestALongTurnIsNotifiedEvenIfTheObserverArrivedLate is a regression test for
+// a notification that was suppressed by a race.
+//
+// The notifier used to date a turn from the moment it first saw it running.
+// That is only the start when the turn began after this process attached, and
+// the notifier is a late observer by nature: it is a subscriber. So a turn with
+// two minutes of work behind it could be judged "too short to interrupt you
+// about" depending on nothing more than when the running frame happened to be
+// processed — which is why the test that covered this failed two runs in five.
+//
+// The payload's own `startedAt` is what the contract sends for exactly this
+// reason, and the reproduction below is the whole bug: publish a turn that says
+// it began before the clock's present, complete it without advancing the clock
+// at all, and require a notification.
+func TestALongTurnIsNotifiedEvenIfTheObserverArrivedLate(t *testing.T) {
+	rec := newReceiver(t)
+	server := rec.serve(t)
+
+	service, err := push.Open(push.Options{StateDir: t.TempDir(), Logger: logx.Discard(), Client: server.Client()})
+	if err != nil {
+		t.Fatalf("push.Open: %v", err)
+	}
+	if err := service.Subscribe(rec.subscription(server.URL + "/push/one")); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	clock := &watchedClock{now: time.Now()}
+	bus := events.New(events.Config{Replay: 64, Queue: 64})
+	notifier, err := push.NewNotifier(push.NotifierOptions{
+		Bus:       bus,
+		Service:   service,
+		Logger:    logx.Discard(),
+		Threshold: 2 * time.Minute,
+		Now:       clock.Read,
+	})
+	if err != nil {
+		t.Fatalf("NewNotifier: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		notifier.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	<-notifier.Ready()
+
+	// A turn that has already been running for ten minutes when the notifier
+	// hears about it. The clock never advances: the elapsed time is entirely in
+	// the payload, which is the point.
+	started := clock.Read().Add(-10 * time.Minute)
+	bus.Publish(events.TypeTurnState, "session-late", events.TurnState{
+		TurnID: "turn-late", State: "running", StartedAt: &started,
+	})
+	bus.Publish(events.TypeTurnState, "session-late", events.TurnState{
+		TurnID: "turn-late", State: "completed", StartedAt: &started,
+	})
+
+	waitFor(t, func() bool { return len(rec.received()) >= 1 },
+		"a notification for a turn that was long before the notifier attached")
+}
+
 func waitFor(t *testing.T, condition func() bool, what string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

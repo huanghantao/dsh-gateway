@@ -332,6 +332,9 @@ type createSessionRequest struct {
 
 // handleCreateSession creates a session and leases it.
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	if !s.admit(w, r) {
+		return
+	}
 	var req createSessionRequest
 	if err := httpcore.DecodeJSON(w, r, &req); err != nil {
 		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()), err)
@@ -393,6 +396,13 @@ type acquireLeaseRequest struct {
 // handleAcquireLease attaches a session, releasing DSH's write lock from any
 // other process if needed.
 func (s *Server) handleAcquireLease(w http.ResponseWriter, r *http.Request) {
+	// Attaching is how a client *starts* driving a session — it takes DSH's
+	// single-writer lock and may create deliverable state — so it is new work,
+	// and a drain refuses it for the same reason it refuses a prompt. Releasing
+	// a lease is not gated: the drain is trying to give sessions back.
+	if !s.admit(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 
 	// The body is optional; an empty one is valid and common.
@@ -606,6 +616,9 @@ type promptBlock struct {
 // so a follow-up typed while watching the agent work is kept. The response says
 // which of the two happened.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
+	if !s.admit(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 
 	var req promptRequest

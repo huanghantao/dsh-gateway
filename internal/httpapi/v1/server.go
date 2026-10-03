@@ -16,6 +16,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn"
@@ -86,6 +87,10 @@ type Deps struct {
 	Version string
 	// StartedAt is when the process came up.
 	StartedAt time.Time
+	// Lifecycle is the gateway's own state. It is what refuses new work while
+	// the process is draining, and it is never nil in production — a nil one
+	// would mean a redeploy accepts prompts it cannot finish.
+	Lifecycle *lifecycle.Lifecycle
 	// Ready reports whether the harness has completed its handshake.
 	Ready func() bool
 	// CatalogPath is where the model catalog observed from the harness is
@@ -328,6 +333,24 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), ctxKeyPrincipal{}, principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// admit refuses a request that would start new work while the gateway is
+// draining. It reports whether the caller should continue.
+//
+// This is the counterpart, at the door, of the drain itself. Without it a
+// redeploy has a race it cannot win: the drain waits for the turns it knows
+// about, and a prompt admitted a millisecond before the harness is closed is a
+// turn nobody waited for — accepted with a 202, then destroyed. The refusal is
+// 503 rather than a conflict because it is temporary by construction, and a
+// client is meant to retry it.
+func (s *Server) admit(w http.ResponseWriter, r *http.Request) bool {
+	if s.deps.Lifecycle == nil || s.deps.Lifecycle.Serving() {
+		return true
+	}
+	httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()),
+		lifecycle.ErrDraining())
+	return false
 }
 
 // rateLimited applies the per-client token bucket.

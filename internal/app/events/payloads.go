@@ -127,3 +127,60 @@ type ApprovalDecision struct {
 	// from a person answering this prompt.
 	GrantID string `json:"grantId,omitempty"`
 }
+
+// Snapshot is the payload of TypeSnapshot: the present state of everything a
+// client renders, sent whenever its view cannot be trusted to be complete.
+//
+// It exists because a `resync` on its own is only half an answer. The old
+// contract said "your view is broken, go and refetch", which costs the client
+// three round trips (transcript, session metadata, approvals) and — worse —
+// leaves it guessing in the meantime. A snapshot says what the state *is*, from
+// the same structures the live frames are built from, so a reconnecting phone
+// renders the truth immediately and the refetch becomes an optimisation rather
+// than a requirement.
+//
+// It deliberately carries only what this package can describe without reaching
+// into the layers above it: the bus is a leaf, and an approval view is the
+// approval layer's business. Pending decisions are added by the transport that
+// has both, which is also the transport that already serialises them for
+// `GET /approvals`.
+type Snapshot struct {
+	// Generation names the sequence space this snapshot is a position in, so a
+	// client can tell a snapshot of the stream it is on from one taken before a
+	// restart.
+	Generation string `json:"generation"`
+	// Seq is the sequence number the snapshot is current as of. Everything at or
+	// below it is superseded by the snapshot; everything above it arrives on the
+	// stream. A client that applies the snapshot and then accepts only strictly
+	// greater sequence numbers converges without a gap and without a duplicate.
+	Seq uint64 `json:"seq"`
+	// Time is when the snapshot was taken, for a client that wants to age it.
+	Time time.Time `json:"time"`
+	// Harness is the child process state.
+	Harness HarnessState `json:"harness"`
+	// Turns holds one entry per session that has a running or queued turn. A
+	// session absent from this list has no turn, which is a claim the snapshot
+	// can make and an event stream cannot.
+	Turns []SessionTurn `json:"turns"`
+}
+
+// SessionTurn is one session's turn state inside a snapshot.
+type SessionTurn struct {
+	SessionID string `json:"sessionId"`
+	// Running is the turn occupying the session, and is nil when only queued
+	// prompts exist.
+	Running *TurnState `json:"running,omitempty"`
+	// Queued is everything waiting behind it, in order.
+	Queued []TurnState `json:"queued,omitempty"`
+}
+
+// Draining is the payload of TypeDraining.
+//
+// It is its own frame, rather than part of HarnessState, because it says the
+// opposite about the agent: the harness is fine, and it is the process in front
+// of it that is leaving. A client that folded the two together would announce a
+// crash for a redeploy.
+type Draining struct {
+	// Reason is a sentence for a human, not a code to branch on.
+	Reason string `json:"reason"`
+}

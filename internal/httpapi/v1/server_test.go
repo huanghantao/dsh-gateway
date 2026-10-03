@@ -13,12 +13,14 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
@@ -38,6 +40,14 @@ import (
 // the handler does with a real agent. A fake keeps them fast and deterministic,
 // and its zero values are the "not ready" answers a caller must cope with.
 type fakeHarness struct {
+	// mu guards everything below it.
+	//
+	// A turn runs on its own goroutine — that is the point of the scheduler — so
+	// the test that starts one and the fake that records it are concurrent by
+	// construction. Without this the race detector reports the test helper
+	// writing the gate while the turn goroutine reads it, which is a real race
+	// in the test rather than in the code under test, and a flaky one at that.
+	mu       sync.Mutex
 	state    harness.State
 	sessions []harness.SessionInfo
 	config   []harness.ConfigOption
@@ -74,8 +84,16 @@ type setConfigCall struct {
 
 func (f *fakeHarness) Start(context.Context) error { return nil }
 func (f *fakeHarness) Close(context.Context) error { return nil }
-func (f *fakeHarness) State() harness.State        { return f.state }
+
+func (f *fakeHarness) State() harness.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
+
 func (f *fakeHarness) Capabilities() harness.Capabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return harness.Capabilities{
 		ProtocolVersion: 1, CanList: true, CanResume: true, CanClose: true,
 		CanPromptImages: f.imagesAllowed,
@@ -83,11 +101,15 @@ func (f *fakeHarness) Capabilities() harness.Capabilities {
 }
 
 func (f *fakeHarness) ListSessions(context.Context, string, string) (harness.SessionPage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.listCalls++
 	return harness.SessionPage{Sessions: f.sessions}, nil
 }
 
 func (f *fakeHarness) NewSession(_ context.Context, workspace string) (harness.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return harness.Session{
 		Info:   harness.SessionInfo{ID: "session-test", Workspace: workspace},
 		Config: f.config,
@@ -95,24 +117,55 @@ func (f *fakeHarness) NewSession(_ context.Context, workspace string) (harness.S
 }
 
 func (f *fakeHarness) ResumeSession(_ context.Context, id, workspace string) (harness.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return harness.Session{
 		Info:   harness.SessionInfo{ID: id, Workspace: workspace},
 		Config: f.config,
 	}, nil
 }
 
-func (f *fakeHarness) CloseSession(context.Context, string) error { return nil }
+func (f *fakeHarness) CloseSession(context.Context, string) error   { return nil }
+func (f *fakeHarness) ReleaseSession(context.Context, string) error { return nil }
 
 func (f *fakeHarness) SetConfigOption(_ context.Context, _, option, value string) ([]harness.ConfigOption, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setCalls = append(f.setCalls, setConfigCall{option: option, value: value})
 	return f.config, nil
 }
 
+// HoldPrompt makes the next prompt block until the returned function is called.
+//
+// It lives on the fake rather than in a test helper because the gate is shared
+// between the test goroutine and the turn goroutine, so the lock that guards it
+// has to be the fake's.
+func (f *fakeHarness) HoldPrompt() func() {
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.promptGate = gate
+	f.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.promptGate = nil
+			f.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
 func (f *fakeHarness) Prompt(ctx context.Context, sessionID string, blocks []harness.PromptBlock) (string, error) {
+	f.mu.Lock()
 	f.prompts = append(f.prompts, promptCall{sessionID: sessionID, blocks: blocks})
-	if f.promptGate != nil {
+	gate := f.promptGate
+	f.mu.Unlock()
+
+	if gate != nil {
 		select {
-		case <-f.promptGate:
+		case <-gate:
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
@@ -120,7 +173,51 @@ func (f *fakeHarness) Prompt(ctx context.Context, sessionID string, blocks []har
 	return "end_turn", nil
 }
 
+func (f *fakeHarness) promptCalls() []promptCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]promptCall(nil), f.prompts...)
+}
+
+func (f *fakeHarness) setConfigCalls() []setConfigCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]setConfigCall(nil), f.setCalls...)
+}
+
+func (f *fakeHarness) cancelCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cancels...)
+}
+
+func (f *fakeHarness) listCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls
+}
+
+func (f *fakeHarness) clearSetCalls() {
+	f.mu.Lock()
+	f.setCalls = nil
+	f.mu.Unlock()
+}
+
+func (f *fakeHarness) resetListCalls() {
+	f.mu.Lock()
+	f.listCalls = 0
+	f.mu.Unlock()
+}
+
+func (f *fakeHarness) setState(state harness.State) {
+	f.mu.Lock()
+	f.state = state
+	f.mu.Unlock()
+}
+
 func (f *fakeHarness) Cancel(_ context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.cancels = append(f.cancels, sessionID)
 	return nil
 }
@@ -136,10 +233,16 @@ type testServer struct {
 	// test against the raw mux would silently skip it and could not notice if it
 	// stopped working.
 	handler http.Handler
-	auth    *devicetoken.Authenticator
-	pair    *pairing.Service
-	token   string // a credential for an enrolled device
-	logger  *logx.Logger
+	// bus is the event bus behind the API, so a test can publish the frames a
+	// real harness would have published — including one from "before a restart".
+	bus *events.Bus
+	// life is the gateway's own state, so a test can drive a redeploy rather
+	// than only describe one.
+	life   *lifecycle.Lifecycle
+	auth   *devicetoken.Authenticator
+	pair   *pairing.Service
+	token  string // a credential for an enrolled device
+	logger *logx.Logger
 	// driver is the fake harness behind the API, so a test can hold a turn open
 	// or inspect what reached the agent.
 	driver *fakeHarness
@@ -237,10 +340,15 @@ func newTestServer(t *testing.T) *testServer {
 	broker := approvals.New(approvals.Options{Timeout: time.Minute, Bus: bus, Logger: logger, Now: now})
 	t.Cleanup(broker.Close)
 
+	// The gateway's own state, so a test can drive a deploy rather than only
+	// describe one.
+	life := lifecycle.New(bus, logger)
+
 	srv, err := New(Deps{
 		Config:    cfg,
 		Logger:    logger,
 		Bus:       bus,
+		Lifecycle: life,
 		Leases:    leases,
 		Approvals: broker,
 		Turns:     scheduler,
@@ -276,6 +384,8 @@ func newTestServer(t *testing.T) *testServer {
 	return &testServer{
 		Server:   srv,
 		handler:  srv.Handler(),
+		bus:      bus,
+		life:     life,
 		auth:     auth,
 		pair:     pairSvc,
 		token:    token,
@@ -740,7 +850,7 @@ func TestReadinessReflectsTheHarness(t *testing.T) {
 	// A harness that is not ready must be reported as such, or a load balancer
 	// would send traffic to a gateway that cannot serve a single prompt.
 	ts.deps.Ready = func() bool { return false }
-	ts.deps.Harness.(*fakeHarness).state = harness.StateRestarting
+	ts.deps.Harness.(*fakeHarness).setState(harness.StateRestarting)
 
 	rec = ts.do(http.MethodGet, "/readyz")
 	if rec.Code != http.StatusServiceUnavailable {
@@ -807,12 +917,12 @@ func TestNewSessionStartsWithTheGatewayDefaults(t *testing.T) {
 		t.Fatalf("POST /sessions returned %d, want 201: %s", rec.Code, rec.Body.String())
 	}
 	want := []setConfigCall{{option: "model", value: model}, {option: "reasoning_effort", value: "max"}}
-	if !reflect.DeepEqual(driver.setCalls, want) {
-		t.Errorf("harness was asked to set %+v, want %+v", driver.setCalls, want)
+	if !reflect.DeepEqual(driver.setConfigCalls(), want) {
+		t.Errorf("harness was asked to set %+v, want %+v", driver.setConfigCalls(), want)
 	}
 
 	// An explicit caller choice is not overridden by the configured default.
-	driver.setCalls = nil
+	driver.clearSetCalls()
 	rec = ts.do(http.MethodPost, "/api/v1/sessions",
 		withCookie(ts.token),
 		withJSON(fmt.Sprintf(`{"workspace":%q,"model":"m1","reasoningEffort":"off"}`, workspace)))
@@ -820,8 +930,8 @@ func TestNewSessionStartsWithTheGatewayDefaults(t *testing.T) {
 		t.Fatalf("POST /sessions returned %d, want 201: %s", rec.Code, rec.Body.String())
 	}
 	want = []setConfigCall{{option: "model", value: "m1"}, {option: "reasoning_effort", value: "off"}}
-	if !reflect.DeepEqual(driver.setCalls, want) {
-		t.Errorf("harness was asked to set %+v, want the caller's own choice %+v", driver.setCalls, want)
+	if !reflect.DeepEqual(driver.setConfigCalls(), want) {
+		t.Errorf("harness was asked to set %+v, want the caller's own choice %+v", driver.setConfigCalls(), want)
 	}
 }
 
@@ -988,14 +1098,14 @@ func TestSessionListIsCachedButNeverStaleForTheOperator(t *testing.T) {
 	// Two reads in a row: the second must not reach the harness. The fake counts
 	// its calls, so this is observation rather than timing.
 	driver := ts.deps.Harness.(*fakeHarness)
-	driver.listCalls = 0
+	driver.resetListCalls()
 	for i := 0; i < 5; i++ {
 		if rec := ts.do(http.MethodGet, "/api/v1/sessions", withCookie(ts.token)); rec.Code != http.StatusOK {
 			t.Fatalf("GET /sessions returned %d", rec.Code)
 		}
 	}
-	if driver.listCalls != 1 {
-		t.Errorf("five list requests asked the harness %d time(s), want 1", driver.listCalls)
+	if driver.listCallCount() != 1 {
+		t.Errorf("five list requests asked the harness %d time(s), want 1", driver.listCallCount())
 	}
 
 	// A page with no filter is cached once, and the cache is dropped the moment a
@@ -1008,8 +1118,8 @@ func TestSessionListIsCachedButNeverStaleForTheOperator(t *testing.T) {
 	if rec := ts.do(http.MethodGet, "/api/v1/sessions", withCookie(ts.token)); rec.Code != http.StatusOK {
 		t.Fatalf("GET /sessions returned %d", rec.Code)
 	}
-	if driver.listCalls != 2 {
-		t.Errorf("the list was served from a cache the create should have dropped (harness calls: %d)", driver.listCalls)
+	if driver.listCallCount() != 2 {
+		t.Errorf("the list was served from a cache the create should have dropped (harness calls: %d)", driver.listCallCount())
 	}
 }
 
@@ -1018,7 +1128,7 @@ func TestSessionListIsCachedButNeverStaleForTheOperator(t *testing.T) {
 func TestSessionListCacheExpires(t *testing.T) {
 	ts := newTestServer(t)
 	driver := ts.deps.Harness.(*fakeHarness)
-	driver.listCalls = 0
+	driver.resetListCalls()
 
 	now := time.Now()
 	ts.now = func() time.Time { return now }
@@ -1030,8 +1140,8 @@ func TestSessionListCacheExpires(t *testing.T) {
 	if rec := ts.do(http.MethodGet, "/api/v1/sessions", withCookie(ts.token)); rec.Code != http.StatusOK {
 		t.Fatalf("GET /sessions returned %d", rec.Code)
 	}
-	if driver.listCalls != 2 {
-		t.Errorf("harness calls = %d, want 2: the listing must expire", driver.listCalls)
+	if driver.listCallCount() != 2 {
+		t.Errorf("harness calls = %d, want 2: the listing must expire", driver.listCallCount())
 	}
 }
 

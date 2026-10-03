@@ -346,7 +346,19 @@ type Harness interface {
 	// holds DSH's write lock, which is the normal case while the desktop GUI has
 	// the session open.
 	ResumeSession(ctx context.Context, sessionID, workspace string) (Session, error)
-	// CloseSession detaches a session and releases its write lock.
+	// ReleaseSession detaches a session without ending it: the writer's lock is
+	// given up and the session is left exactly as it is, resumable later.
+	//
+	// It is separate from CloseSession because the two are called for opposite
+	// reasons, and conflating them was a real bug. "Nobody is watching this any
+	// more" — a lease that expired while a phone was idle — must not mark a
+	// conversation finished; only "this session is being deleted" should. An
+	// implementation with one method has to choose which of the two to be wrong
+	// about, and either choice is visible to the operator.
+	ReleaseSession(ctx context.Context, sessionID string) error
+	// CloseSession ends a session, durably. DSH records a synthetic end in the
+	// session's own log, which is what makes this the deletion path rather than
+	// the detach path.
 	CloseSession(ctx context.Context, sessionID string) error
 
 	// SetConfigOption changes model or reasoning effort.

@@ -495,6 +495,19 @@ export interface ApprovalGranted {
 
 export interface HelloData {
   readonly deviceId: string;
+  /**
+   * Names this run's sequence space. A `seq` is only a position *within* a
+   * generation: a redeploy numbers its events from one again, so a bookmark kept
+   * across one is not behind the new stream, it is meaningless to it. The client
+   * sends it back on the next reconnect and treats a change as "my view is from
+   * a process that is gone".
+   */
+  readonly generation: string;
+  /**
+   * The position the server actually resumed from, which is not necessarily the
+   * one that was asked for: a resumable cursor is honoured, and anything else
+   * resolves to a resync plus a snapshot.
+   */
   readonly replayFrom: number | null;
 }
 
@@ -532,6 +545,12 @@ export interface MessageData {
   readonly attachments: number;
 }
 
+/** The `session.thought` payload: one committed reasoning block. */
+export interface ThoughtData {
+  readonly id: string | null;
+  readonly text: string;
+}
+
 export type ToolPhase = "start" | "end";
 
 /** The `session.tool` payload: one lifecycle frame for one call. */
@@ -564,6 +583,52 @@ export interface HarnessStateData {
   readonly detail: string | null;
 }
 
+/**
+ * The `snapshot` payload: what is true right now, sent after a `resync` and when
+ * a session is first subscribed to.
+ *
+ * It exists so that a client which cannot prove its stream was continuous —
+ * after a redeploy, after falling behind, on opening an old conversation that
+ * turns out to be mid-turn — renders the truth immediately instead of showing a
+ * plausible-looking stale screen. `seq` is the position the snapshot is current
+ * as of: frames at or below it are already reflected here.
+ */
+export interface SnapshotData {
+  readonly generation: string;
+  readonly seq: number;
+  readonly time: string;
+  readonly harness: HarnessStateData;
+  /** One entry per session with a turn, running or waiting. */
+  readonly turns: readonly SessionTurnSnapshot[];
+  /** Decisions waiting on a person, as `GET /approvals` would return them. */
+  readonly approvals: readonly Approval[];
+}
+
+export interface SessionTurnSnapshot {
+  readonly sessionId: string;
+  readonly running: TurnStateData | null;
+  readonly queued: readonly TurnStateData[];
+}
+
+/**
+ * The gateway is going away on purpose — a redeploy, not a fault. It is its own
+ * frame type rather than a `harness.state` so that the UI can say "restarting
+ * for an update" instead of "the agent crashed".
+ */
+export interface DrainingData {
+  readonly reason: string;
+}
+
+/**
+ * Why a `resync` arrived. The client does not branch on the text — every resync
+ * means the same thing, "refetch what you are showing" — but it is surfaced in
+ * the connection detail, because "the gateway restarted" and "you fell behind"
+ * are different stories to tell an operator reading a bug report.
+ */
+export interface ResyncData {
+  readonly reason: string;
+}
+
 interface EventEnvelope {
   readonly seq: number;
   readonly time: string;
@@ -575,13 +640,16 @@ export type ServerEvent =
   | (EventEnvelope & { readonly type: "session.state"; readonly data: SessionPatch })
   | (EventEnvelope & { readonly type: "session.message"; readonly data: MessageData })
   | (EventEnvelope & { readonly type: "session.tool"; readonly data: ToolData })
+  | (EventEnvelope & { readonly type: "session.thought"; readonly data: ThoughtData })
   | (EventEnvelope & { readonly type: "usage.update"; readonly data: TokenUsage })
   | (EventEnvelope & { readonly type: "approval.requested"; readonly data: Approval })
   | (EventEnvelope & { readonly type: "approval.resolved"; readonly data: ApprovalResolved })
   | (EventEnvelope & { readonly type: "approval.granted"; readonly data: ApprovalGranted })
   | (EventEnvelope & { readonly type: "turn.state"; readonly data: TurnStateData })
   | (EventEnvelope & { readonly type: "harness.state"; readonly data: HarnessStateData })
-  | (EventEnvelope & { readonly type: "resync"; readonly data: null });
+  | (EventEnvelope & { readonly type: "snapshot"; readonly data: SnapshotData })
+  | (EventEnvelope & { readonly type: "gateway.draining"; readonly data: DrainingData })
+  | (EventEnvelope & { readonly type: "resync"; readonly data: ResyncData });
 
 export type ServerEventType = ServerEvent["type"];
 

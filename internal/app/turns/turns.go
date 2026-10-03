@@ -359,6 +359,18 @@ func (s *Scheduler) Queue(sessionID string) Queue {
 	return queueOf(s.sessions[sessionID])
 }
 
+// BusyAny reports whether any session has a turn running.
+//
+// It is what a drain waits on. A queued prompt deliberately does not count: it
+// has not started, so a deploy that is waiting to be polite is not obliged to
+// wait for work the agent has not begun — and the queue is re-established from
+// the client, which is still holding the prompt it typed.
+func (s *Scheduler) BusyAny() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running > 0
+}
+
 // run executes one turn and hands the session to whatever is queued behind it.
 func (s *Scheduler) run(t *turn) {
 	// The context is deliberately not tied to any request: a turn outlives the

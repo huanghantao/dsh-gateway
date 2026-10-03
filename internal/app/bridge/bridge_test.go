@@ -41,7 +41,7 @@ func TestToolStatusVocabulary(t *testing.T) {
 // exists at all.
 func TestClosingFrameKeepsTheNameAndCarriesTheFacts(t *testing.T) {
 	bus := events.New(events.Config{Replay: 8, Queue: 8})
-	sub, _ := bus.Subscribe(0, nil)
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
 	defer sub.Close()
 	b := New(bus, config.Default().Limits)
 
