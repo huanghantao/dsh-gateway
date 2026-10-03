@@ -216,6 +216,10 @@ func (s *Scheduler) Submit(ctx context.Context, sessionID string, blocks []harne
 		s.mu.Unlock()
 
 		s.logger.Info("turn started", "session", sessionID, "turn", t.id)
+		s.publishEcho(sessionID, t.blocks)
+		// The session is busy now, and it was not before: this is the one place
+		// that transition happens, so it is the one place that announces it.
+		s.bus.Publish(events.TypeSessionState, sessionID, events.SessionBusy{Busy: true})
 		s.publish(t, 0)
 		// The context travels on the turn, detached from the request that
 		// admitted it — see turn.base. Detachment is the point of the design, so
@@ -253,6 +257,11 @@ func (s *Scheduler) Submit(ctx context.Context, sessionID string, blocks []harne
 
 	s.logger.Info("prompt queued behind a running turn",
 		"session", sessionID, "turn", t.id, "position", t.position)
+	// A queued prompt is announced like any other: the phone that typed it shows
+	// its own copy, and every other client has to be able to see what is waiting
+	// — the queue strip deliberately carries no text, so this frame is the only
+	// place the words exist until the turn runs.
+	s.publishEcho(sessionID, t.blocks)
 	s.publish(t, behind)
 	return ticketOf(t), nil
 }
@@ -380,7 +389,60 @@ func (s *Scheduler) run(t *turn) {
 	if next != nil {
 		s.publish(next, behind)
 		go s.run(next)
+		return
 	}
+	// Nothing is left to run, so the session is no longer busy. Publishing the
+	// *change* rather than the state is what keeps this honest: while a queued
+	// prompt is promoted the session was busy and still is, and a frame saying so
+	// would only be noise.
+	s.bus.Publish(events.TypeSessionState, t.sessionID, events.SessionBusy{Busy: false})
+}
+
+// publishEcho announces a prompt this gateway has admitted.
+//
+// The client that typed it draws its own copy the moment the request succeeds.
+// Every other client — and that one, after a reload — would otherwise know
+// nothing until the session log committed the prompt, which is why a follow-up
+// typed elsewhere arrived late or not at all. The echo carries no id: the log
+// owns the durable one, and a client that merges history by id must let the
+// committed row replace this.
+func (s *Scheduler) publishEcho(sessionID string, blocks []harness.PromptBlock) {
+	text := promptText(blocks)
+	attachments := promptAttachments(blocks)
+	if strings.TrimSpace(text) == "" && attachments == 0 {
+		return
+	}
+	s.bus.Publish(events.TypeSessionMessage, sessionID, events.MessageData{
+		Role:        "user",
+		Text:        text,
+		Attachments: attachments,
+	})
+}
+
+// promptText is the prompt as a reader typed it: the text blocks concatenated,
+// in order, exactly the way the transcript projects the same message. The two
+// have to agree — a client folds history over live frames, and a prompt that
+// read differently in each would look like two prompts.
+func promptText(blocks []harness.PromptBlock) string {
+	var body strings.Builder
+	for _, block := range blocks {
+		if block.Type == "text" {
+			body.WriteString(block.Text)
+		}
+	}
+	return body.String()
+}
+
+// promptAttachments counts the blocks that are not text: a screenshot, a pasted
+// image. A prompt that was only pictures still has to render as something.
+func promptAttachments(blocks []harness.PromptBlock) int {
+	count := 0
+	for _, block := range blocks {
+		if block.Type != "text" {
+			count++
+		}
+	}
+	return count
 }
 
 // advance retires t and promotes the next queued prompt, if any. It returns the

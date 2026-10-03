@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests cover the prompt lifecycle over the real route table: admission,
@@ -183,6 +184,14 @@ func TestImagePromptReachesTheHarness(t *testing.T) {
 	rec := ts.do("POST", "/api/v1/sessions/session-test/prompt", withCookie(ts.token), withJSON(body))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	// The ticket is the answer, and the turn itself runs in its own goroutine:
+	// the harness may not have been called yet when the 202 lands. Waiting is
+	// what makes this a test of the image block rather than of the scheduler's
+	// timing, which is a race the ticket deliberately does not win.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(ts.driver.prompts) == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
 	}
 	if len(ts.driver.prompts) != 1 {
 		t.Fatalf("prompts = %d, want one", len(ts.driver.prompts))

@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/config"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 	"github.com/huanghantao/dsh-gateway/internal/sessionlog"
 )
@@ -58,6 +59,11 @@ type Options struct {
 	// case its activity already arrives over ACP and must not be repeated here.
 	// Nil means "no session is owned".
 	Owned func(sessionID string) bool
+	// Limits is the deployment's byte budget for a tool frame. The watcher
+	// publishes tool lifecycle for sessions the desktop is driving, and a phone
+	// cannot tell those frames from the bridge's — so they are bounded by the
+	// same numbers, in the same place.
+	Limits config.Limits
 	// Interval between sweeps. Zero means DefaultInterval.
 	Interval time.Duration
 	Logger   *logx.Logger
@@ -367,7 +373,7 @@ func (w *Watcher) publishTurn(sessionID string, running bool, turnCount int) {
 	if running {
 		state = "running"
 	}
-	w.opts.Bus.Publish(events.TypeSessionState, sessionID, map[string]any{"busy": running})
+	w.opts.Bus.Publish(events.TypeSessionState, sessionID, events.SessionBusy{Busy: running})
 	w.opts.Bus.Publish(events.TypeTurnState, sessionID, events.TurnState{
 		TurnID: fmt.Sprintf("log-%d", turnCount+1),
 		State:  state,
@@ -380,29 +386,30 @@ func (w *Watcher) publishItem(sessionID string, item sessionlog.Item, update boo
 	case sessionlog.RoleUser:
 		// Not a row the phone typed: it came from the desk, and it should appear
 		// there too. `role` is what tells the two apart.
-		w.opts.Bus.Publish(events.TypeSessionMessage, sessionID, map[string]any{
-			"id":   item.ID,
-			"role": "user",
-			"text": item.Text,
+		w.opts.Bus.Publish(events.TypeSessionMessage, sessionID, events.MessageData{
+			ID:          item.ID,
+			Role:        "user",
+			Text:        item.Text,
+			Attachments: item.Attachments,
 		})
 
 	case sessionlog.RoleAssistant:
-		data := map[string]any{
-			"id":   item.ID,
-			"role": "assistant",
-			"text": item.Text,
+		data := events.MessageData{
+			ID:   item.ID,
+			Role: "assistant",
+			Text: item.Text,
 		}
 		if item.Thinking != "" {
-			data["thinking"] = item.Thinking
+			data.Thinking = item.Thinking
 		}
 		if item.Model != "" {
-			data["model"] = item.Model
+			data.Model = item.Model
 		}
 		if item.Usage != nil {
-			data["usage"] = map[string]any{
-				"inputTokens":  item.Usage.InputTokens,
-				"outputTokens": item.Usage.OutputTokens,
-				"totalTokens":  item.Usage.TotalTokens,
+			data.Usage = &events.MessageUsage{
+				InputTokens:  item.Usage.InputTokens,
+				OutputTokens: item.Usage.OutputTokens,
+				TotalTokens:  item.Usage.TotalTokens,
 			}
 		}
 		w.opts.Bus.Publish(events.TypeSessionMessage, sessionID, data)
@@ -413,23 +420,30 @@ func (w *Watcher) publishItem(sessionID string, item sessionlog.Item, update boo
 		// between two sweeps is published as both, so the card is complete
 		// rather than a result that arrived from nowhere.
 		if !update {
-			w.opts.Bus.Publish(events.TypeSessionTool, sessionID, map[string]any{
-				"phase":   "start",
-				"callId":  item.ID,
-				"tool":    item.Tool,
-				"status":  "in_progress",
-				"input":   item.Input,
-				"isError": false,
+			w.publishTool(sessionID, events.ToolFacts{
+				Phase:  events.ToolStarted,
+				CallID: item.ID,
+				Tool:   item.Tool,
+				Status: events.ToolInProgress,
+				Input:  item.Input,
 			})
 		}
 		if !item.Pending {
-			w.opts.Bus.Publish(events.TypeSessionTool, sessionID, map[string]any{
-				"phase":   "end",
-				"callId":  item.ID,
-				"tool":    item.Tool,
-				"status":  "completed",
-				"output":  item.Output,
-				"isError": item.IsError,
+			// The status is the log's own answer, not an assumption: a result
+			// recorded as an error is a failed call, and publishing "completed"
+			// for it would have the two producers disagree about the same fact.
+			status := events.ToolCompleted
+			if item.IsError {
+				status = events.ToolFailed
+			}
+			w.publishTool(sessionID, events.ToolFacts{
+				Phase:   events.ToolEnded,
+				CallID:  item.ID,
+				Tool:    item.Tool,
+				Status:  status,
+				Output:  item.Output,
+				IsError: item.IsError,
+				Facts:   item.Facts,
 			})
 		}
 
@@ -440,7 +454,12 @@ func (w *Watcher) publishItem(sessionID string, item sessionlog.Item, update boo
 	}
 }
 
-// publishMeta emits the session-level changes a list or header cares about.
+// publishTool emits one tool lifecycle frame, bounded by the deployment's
+// budgets and shaped by the same constructor the ACP bridge uses.
+func (w *Watcher) publishTool(sessionID string, facts events.ToolFacts) {
+	w.opts.Bus.Publish(events.TypeSessionTool, sessionID, events.NewToolData(facts, w.opts.Limits))
+}
+
 // publishMeta emits the session-level changes a list or header cares about. The
 // turn itself is not one of them: `publishTurn` owns that frame, because the
 // turn's state is the log *and* the lock, and only one place may announce it.

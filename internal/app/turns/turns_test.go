@@ -540,3 +540,110 @@ func codeOf(t *testing.T, err error) string {
 	}
 	return code
 }
+
+// TestAdmittedPromptIsEchoedAndBusyIsAnnounced covers the two session-level
+// frames a client cannot derive on its own.
+//
+// The echo: a prompt this gateway admits is announced to every client, because
+// the one that typed it draws its own copy and nobody else would know the words
+// until the session log committed them. The busy frame: a client keeps its own
+// answer to "is a turn running" — the composer reads it to decide whether Stop
+// belongs on screen — and a turn that settles without saying so leaves Stop on
+// screen with nothing behind it.
+func TestAdmittedPromptIsEchoedAndBusyIsAnnounced(t *testing.T) {
+	h := newFakeHarness()
+	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
+	sub, _ := bus.Subscribe(0, nil)
+	defer sub.Close()
+
+	blocks := []harness.PromptBlock{
+		{Type: "text", Text: "look at this"},
+		{Type: "image", MIMEType: "image/jpeg", Data: []byte{1, 2, 3}},
+	}
+	if _, err := s.Submit(context.Background(), "session-1", blocks); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	first := h.nextStart(t)
+
+	// The opening frames: the prompt, then the session saying it is busy.
+	var echoed *events.MessageData
+	busy := -1
+	deadline := time.After(3 * time.Second)
+	for echoed == nil || busy == -1 {
+		select {
+		case e := <-sub.Events():
+			switch data := e.Data.(type) {
+			case events.MessageData:
+				copied := data
+				echoed = &copied
+			case events.SessionBusy:
+				if data.Busy {
+					busy = 1
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for the echo and the busy frame (echo=%v busy=%d)", echoed, busy)
+		}
+	}
+	if echoed.Role != "user" {
+		t.Errorf("echo role = %q, want user", echoed.Role)
+	}
+	if echoed.Text != "look at this" {
+		t.Errorf("echo text = %q, want the prompt's text", echoed.Text)
+	}
+	if echoed.ID != "" {
+		t.Errorf("echo id = %q, want empty: the log owns the durable id", echoed.ID)
+	}
+	if echoed.Attachments != 1 {
+		t.Errorf("echo attachments = %d, want 1 for the image block", echoed.Attachments)
+	}
+
+	// Settling the last turn has to say the session is idle again.
+	first.finish()
+	idle := false
+	deadline = time.After(3 * time.Second)
+	for !idle {
+		select {
+		case e := <-sub.Events():
+			if data, ok := e.Data.(events.SessionBusy); ok && !data.Busy {
+				idle = true
+			}
+		case <-deadline:
+			t.Fatal("no busy=false frame after the last turn settled")
+		}
+	}
+}
+
+// TestQueuedPromptIsEchoedToo: a prompt waiting behind a running turn is still a
+// message the reader wrote, and the queue strip deliberately carries no text.
+func TestQueuedPromptIsEchoedToo(t *testing.T) {
+	h := newFakeHarness()
+	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
+	sub, _ := bus.Subscribe(0, nil)
+	defer sub.Close()
+
+	if _, err := s.Submit(context.Background(), "session-1", []harness.PromptBlock{{Type: "text", Text: "first"}}); err != nil {
+		t.Fatalf("first Submit: %v", err)
+	}
+	first := h.nextStart(t)
+	if _, err := s.Submit(context.Background(), "session-1", []harness.PromptBlock{{Type: "text", Text: "queued behind it"}}); err != nil {
+		t.Fatalf("second Submit: %v", err)
+	}
+	first.finish()
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case e := <-sub.Events():
+			data, ok := e.Data.(events.MessageData)
+			if !ok || data.Role != "user" {
+				continue
+			}
+			if data.Text == "queued behind it" {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the queued prompt was never echoed")
+		}
+	}
+}

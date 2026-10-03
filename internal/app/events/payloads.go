@@ -56,6 +56,57 @@ type HarnessState struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// SessionBusy is the payload of the `session.state` frame that answers whether a
+// turn is running for a session.
+//
+// It is published by the turn scheduler, for a session this gateway drives, and
+// by the log watcher, for one the desktop drives; the two never overlap, because
+// the watcher is silent about a session the gateway owns. The frame exists
+// because a client keeps its own copy of the answer — the composer reads it to
+// decide whether Stop belongs on screen — so the producer that changes it has to
+// say so. Without it, a phone that had already loaded a session sat on the
+// `busy: true` it was born with: Stop stayed on screen after the turn it stopped
+// had ended, and nothing but a reload could clear it.
+type SessionBusy struct {
+	Busy bool `json:"busy"`
+}
+
+// MessageData is the payload of TypeSessionMessage: one row of the conversation.
+//
+// Three producers fill it in, and they know different amounts: the ACP bridge
+// sends the assistant's committed text as it arrives, the log watcher sends
+// whole rows read back from a session the desk is driving, and the turn
+// scheduler sends the echo of a prompt this gateway has just admitted. Fields
+// beyond the role and the text are optional for that reason.
+type MessageData struct {
+	// ID is DSH's durable id once the session log has one. It is empty for a
+	// prompt echo, which exists before the log records the prompt — so a client
+	// that merges history by id must let the committed row replace the echo
+	// rather than adding to it.
+	ID string `json:"id,omitempty"`
+	// Role is "user" or "assistant".
+	Role string `json:"role"`
+	// Text is the message body; a prompt that was only images has none.
+	Text string `json:"text"`
+	// Thinking is committed reasoning, which only the log path carries: the ACP
+	// path sends it as its own `session.thought` frame.
+	Thinking string `json:"thinking,omitempty"`
+	// Model names the model that produced an assistant message.
+	Model string `json:"model,omitempty"`
+	// Usage is per-message token accounting, from the log alone.
+	Usage *MessageUsage `json:"usage,omitempty"`
+	// Attachments counts the non-text blocks the message carried, so that a
+	// prompt which was only a screenshot does not render as an empty row.
+	Attachments int `json:"attachments,omitempty"`
+}
+
+// MessageUsage is per-message token accounting on a committed message.
+type MessageUsage struct {
+	InputTokens  int `json:"inputTokens"`
+	OutputTokens int `json:"outputTokens"`
+	TotalTokens  int `json:"totalTokens"`
+}
+
 // ApprovalDecision is the payload of TypeApprovalResolved.
 //
 // DecidedBy is the field that matters most to a reader: "operator" means a

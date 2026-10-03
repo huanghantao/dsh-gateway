@@ -248,22 +248,27 @@ func TestAppendedEventsArePublished(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("an appended assistant message published nothing")
 	}
-	var message map[string]any
+	var message *events.MessageData
 	for _, e := range got {
-		if e.Type == events.TypeSessionMessage {
-			message = e.Data.(map[string]any)
+		if e.Type != events.TypeSessionMessage {
+			continue
 		}
+		data, ok := e.Data.(events.MessageData)
+		if !ok {
+			t.Fatalf("session.message payload = %T, want events.MessageData", e.Data)
+		}
+		message = &data
 	}
 	if message == nil {
 		t.Fatalf("no session.message among %v", typesOf(got))
 	}
-	if message["id"] != "a1" || message["role"] != "assistant" || message["text"] != "hi there" {
-		t.Errorf("message = %v, want the appended assistant message", message)
+	if message.ID != "a1" || message.Role != "assistant" || message.Text != "hi there" {
+		t.Errorf("message = %+v, want the appended assistant message", message)
 	}
-	if message["model"] != "provider/model" {
-		t.Errorf("model = %v, want the message's model", message["model"])
+	if message.Model != "provider/model" {
+		t.Errorf("model = %q, want the message's model", message.Model)
 	}
-	if _, ok := message["usage"]; !ok {
+	if message.Usage == nil {
 		t.Error("the message carried usage in the log but none was published")
 	}
 }
@@ -284,9 +289,12 @@ func TestPromptTypedElsewhereIsPublished(t *testing.T) {
 		if e.Type != events.TypeSessionMessage {
 			continue
 		}
-		data := e.Data.(map[string]any)
-		if data["role"] != "user" || data["text"] != "typed at the desk" {
-			t.Errorf("published %v, want a user message", data)
+		data, ok := e.Data.(events.MessageData)
+		if !ok {
+			t.Fatalf("session.message payload = %T, want events.MessageData", e.Data)
+		}
+		if data.Role != "user" || data.Text != "typed at the desk" {
+			t.Errorf("published %+v, want a user message", data)
 		}
 		found = true
 	}
@@ -312,8 +320,12 @@ func TestToolCallBecomesTwoFrames(t *testing.T) {
 	if len(started) != 1 || started[0].Type != events.TypeSessionTool {
 		t.Fatalf("tool call published %v, want one session.tool", typesOf(started))
 	}
-	if data := started[0].Data.(map[string]any); data["phase"] != "start" || data["callId"] != "c1" || data["tool"] != "bash" {
-		t.Errorf("start frame = %v", data)
+	start, ok := started[0].Data.(events.ToolData)
+	if !ok {
+		t.Fatalf("start payload is %T, want events.ToolData", started[0].Data)
+	}
+	if start.Phase != events.ToolStarted || start.CallID != "c1" || start.Tool != "bash" {
+		t.Errorf("start frame = %+v", start)
 	}
 
 	f.flush(map[string]any{
@@ -327,17 +339,78 @@ func TestToolCallBecomesTwoFrames(t *testing.T) {
 	})
 	watcher.Sweep(context.Background())
 
-	var end map[string]any
+	var end *events.ToolData
 	for _, e := range drain(sub) {
-		if e.Type == events.TypeSessionTool {
-			end = e.Data.(map[string]any)
+		if e.Type != events.TypeSessionTool {
+			continue
+		}
+		data, ok := e.Data.(events.ToolData)
+		if !ok {
+			t.Fatalf("end payload is %T, want events.ToolData", e.Data)
+		}
+		end = &data
+	}
+	if end == nil || end.Phase != events.ToolEnded || end.CallID != "c1" {
+		t.Fatalf("end frame = %+v, want the result closing c1", end)
+	}
+	if end.Output != "listing" {
+		t.Errorf("output = %q, want the result text", end.Output)
+	}
+}
+
+// TestToolResultFactsReachThePhone pins the difference between "the call failed"
+// and "the command exited non-zero": DSH reports the second without erroring, so
+// a phone that only had the boolean would show a failed command as done.
+func TestToolResultFactsReachThePhone(t *testing.T) {
+	f := newFixture(t, "session-five")
+
+	watcher, _, sub := f.watcher(t, nil)
+	watcher.Sweep(context.Background())
+
+	f.flush(map[string]any{
+		"type": "tool/call",
+		"data": map[string]any{"callId": "c1", "name": "bash", "arguments": `{"command":"go test ./..."}`},
+	})
+	f.flush(map[string]any{
+		"type": "tool/result",
+		"data": map[string]any{
+			"message": map[string]any{
+				"toolCallId": "c1",
+				"content": []map[string]any{{
+					"type": "text",
+					"text": "FAIL\n[output truncated; full output: /tmp/spill.txt]\n[exit code: 1]",
+				}},
+				"isError": false,
+				"id":      "r1",
+			},
+			"error": map[string]any{"name": "FsError", "code": "FS_NOT_OBSERVED"},
+		},
+	})
+	watcher.Sweep(context.Background())
+
+	var end *events.ToolData
+	for _, e := range drain(sub) {
+		if e.Type != events.TypeSessionTool {
+			continue
+		}
+		if data, ok := e.Data.(events.ToolData); ok && data.Phase == events.ToolEnded {
+			end = &data
 		}
 	}
-	if end == nil || end["phase"] != "end" || end["callId"] != "c1" {
-		t.Fatalf("end frame = %v, want the result closing c1", end)
+	if end == nil {
+		t.Fatal("no end frame was published")
 	}
-	if end["output"] != "listing" {
-		t.Errorf("output = %v, want the result text", end["output"])
+	if end.IsError {
+		t.Error("IsError = true, want false: DSH reports a non-zero exit rather than erroring")
+	}
+	if end.ExitCode == nil || *end.ExitCode != 1 {
+		t.Errorf("ExitCode = %v, want 1", end.ExitCode)
+	}
+	if end.ErrorCode != "FS_NOT_OBSERVED" {
+		t.Errorf("ErrorCode = %q, want the log's structured error", end.ErrorCode)
+	}
+	if !end.HarnessTruncated || end.SpillPath != "/tmp/spill.txt" {
+		t.Errorf("truncation = (%v, %q), want (true, /tmp/spill.txt)", end.HarnessTruncated, end.SpillPath)
 	}
 }
 
@@ -372,9 +445,14 @@ func TestOwnedSessionsAreSilentButStayCurrent(t *testing.T) {
 	got := drain(sub)
 	var texts []string
 	for _, e := range got {
-		if e.Type == events.TypeSessionMessage {
-			texts = append(texts, e.Data.(map[string]any)["text"].(string))
+		if e.Type != events.TypeSessionMessage {
+			continue
 		}
+		data, ok := e.Data.(events.MessageData)
+		if !ok {
+			t.Fatalf("session.message payload = %T, want events.MessageData", e.Data)
+		}
+		texts = append(texts, data.Text)
 	}
 	if len(texts) != 1 || texts[0] != "written at the desk" {
 		t.Fatalf("after the handover published %v, want only the newest message", texts)
@@ -401,7 +479,10 @@ func TestHalfWrittenFrameIsRetried(t *testing.T) {
 
 	var found bool
 	for _, e := range drain(sub) {
-		if e.Type == events.TypeSessionMessage && e.Data.(map[string]any)["text"] == "cut in half" {
+		if e.Type != events.TypeSessionMessage {
+			continue
+		}
+		if data, ok := e.Data.(events.MessageData); ok && data.Text == "cut in half" {
 			found = true
 		}
 	}
@@ -467,9 +548,14 @@ func TestEvictedProjectionIsSeededNotReplayed(t *testing.T) {
 
 	var texts []string
 	for _, e := range drain(sub) {
-		if e.Type == events.TypeSessionMessage {
-			texts = append(texts, e.Data.(map[string]any)["text"].(string))
+		if e.Type != events.TypeSessionMessage {
+			continue
 		}
+		data, ok := e.Data.(events.MessageData)
+		if !ok {
+			t.Fatalf("session.message payload = %T, want events.MessageData", e.Data)
+		}
+		texts = append(texts, data.Text)
 	}
 	if len(texts) != 1 || texts[0] != "and this one is news" {
 		t.Fatalf("after re-seeding published %v, want only the next message", texts)

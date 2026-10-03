@@ -239,7 +239,7 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 
 	// The bridge is the update sink, so it is built before the adapter that
 	// publishes into it.
-	updates := bridge.New(bus)
+	updates := bridge.New(bus, cfg.Limits)
 
 	approvalsBroker := approvals.New(approvals.Options{
 		Timeout:  cfg.Session.ApprovalTimeout.Std(),
@@ -461,6 +461,7 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 			Store:    history,
 			Bus:      bus,
 			Owned:    leases.IsLeased,
+			Limits:   cfg.Limits,
 			Interval: cfg.Transcript.FollowInterval.Std(),
 			Logger:   logger,
 		})

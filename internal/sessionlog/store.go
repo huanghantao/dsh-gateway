@@ -39,6 +39,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // SupportedVersion is the session log schema this build understands. It is the
@@ -98,6 +99,17 @@ type Item struct {
 	IsError bool   `json:"isError,omitempty"`
 	// Pending is true for a tool call whose result has not been recorded.
 	Pending bool `json:"pending,omitempty"`
+	// EndedAt is when the result was recorded, which is what makes a call's
+	// duration knowable in history. It is a pointer because "the log does not
+	// say" and "the log says the zero time" are different answers, and only the
+	// first should be omitted.
+	EndedAt *time.Time `json:"endedAt,omitempty"`
+	// Facts is what the recorded result said about how the call ended: the exit
+	// status, the harness's own error, whether it truncated its output. The
+	// session log is the only place these exist for a call the gateway did not
+	// drive, and isError alone does not carry them — DSH reports a non-zero exit
+	// rather than erroring, so a failed command is recorded as a success.
+	toolresult.Facts
 
 	// Attachments is how many non-text blocks the message carried — a
 	// screenshot, a pasted image. The image itself is deliberately not

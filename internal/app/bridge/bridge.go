@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/config"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 )
 
@@ -20,30 +21,43 @@ import (
 type Bridge struct {
 	bus *events.Bus
 
-	// tools remembers the tool name per call id.
+	// open remembers what a call was opened with, per call id.
 	//
 	// This is not a nicety. Verified against the live harness: the opening
-	// `tool_call` update carries `title` (the tool name) and the closing
-	// `tool_call_update` does not. Without this map the completing event would
-	// reach the phone with an empty tool name, and the UI could not say what
-	// finished.
-	mu    sync.Mutex
-	tools map[string]string
+	// `tool_call` update carries `title` (the tool name) and `rawInput`, and the
+	// closing `tool_call_update` carries neither. Without this the completing
+	// event would reach the phone with an empty tool name *and* no arguments —
+	// a card with no way to say what finished, or what it had been doing.
+	//
+	// Entries live only as long as the call does: a completion removes its own,
+	// so the map is bounded by how many calls are in flight at once.
+	mu   sync.Mutex
+	open map[string]opened
+
+	// limits is the deployment's byte budget for a tool's arguments and result.
+	// It is held here so that one payload shape is bounded in one place.
+	limits config.Limits
+}
+
+// opened is what a call was announced with.
+type opened struct {
+	name  string
+	input string
 }
 
 // New builds a Bridge.
-func New(bus *events.Bus) *Bridge {
-	return &Bridge{bus: bus, tools: map[string]string{}}
+func New(bus *events.Bus, limits config.Limits) *Bridge {
+	return &Bridge{bus: bus, open: map[string]opened{}, limits: limits}
 }
 
 // Publish implements harness.UpdateSink.
 func (b *Bridge) Publish(u harness.Update) {
 	switch u.Kind {
 	case harness.UpdateMessage:
-		b.bus.Publish(events.TypeSessionMessage, u.SessionID, map[string]any{
-			"id":   u.MessageID,
-			"role": "assistant",
-			"text": u.Text,
+		b.bus.Publish(events.TypeSessionMessage, u.SessionID, events.MessageData{
+			ID:   u.MessageID,
+			Role: "assistant",
+			Text: u.Text,
 		})
 
 	case harness.UpdateThought:
@@ -78,47 +92,68 @@ func (b *Bridge) publishTool(u harness.Update) {
 	}
 	tool := u.Tool
 
-	// Resolve the tool name, preferring what the adapter reported and falling
-	// back to what the opening event recorded.
-	name := tool.Title
-	if name != "" {
-		if tool.Status == harness.ToolInProgress {
-			b.mu.Lock()
-			b.tools[tool.ID] = name
-			b.mu.Unlock()
+	status := toolStatusOf(tool.Status)
+	phase := events.ToolStarted
+	if status != events.ToolInProgress {
+		phase = events.ToolEnded
+	}
+
+	// Resolve the name and the arguments, preferring what the adapter reported
+	// and falling back to what the opening frame recorded.
+	name, input := tool.Title, tool.Input
+	b.mu.Lock()
+	known, tracked := b.open[tool.ID]
+	switch {
+	case phase == events.ToolStarted:
+		if name == "" {
+			name = known.name
 		}
-	} else {
-		b.mu.Lock()
-		name = b.tools[tool.ID]
-		b.mu.Unlock()
+		if input == "" {
+			input = known.input
+		}
+		b.open[tool.ID] = opened{name: name, input: input}
+	case tracked:
+		// A completion: fill in whatever it left out, then stop tracking. Leaving
+		// entries behind would grow without bound over a long-lived gateway.
+		if name == "" {
+			name = known.name
+		}
+		if input == "" {
+			input = known.input
+		}
+		delete(b.open, tool.ID)
 	}
+	b.mu.Unlock()
 
-	phase := "start"
-	switch tool.Status {
-	case harness.ToolCompleted, harness.ToolFailed:
-		phase = "end"
-		b.mu.Lock()
-		// The call is over, so stop tracking it. Leaving entries behind would
-		// grow without bound over a long-lived gateway.
-		delete(b.tools, tool.ID)
-		b.mu.Unlock()
+	b.bus.Publish(events.TypeSessionTool, u.SessionID, events.NewToolData(events.ToolFacts{
+		Phase:   phase,
+		CallID:  tool.ID,
+		Tool:    name,
+		Status:  status,
+		Input:   input,
+		Output:  tool.Output,
+		IsError: tool.IsError,
+		Facts:   tool.Result.Facts(),
+	}, b.limits))
+}
+
+// toolStatusOf maps a harness lifecycle word onto the wire vocabulary.
+//
+// The default matters more than the cases. A status this build has never heard
+// of is read as "still running", which keeps the card on screen and honest; the
+// alternative — and what this used to do — was to call it completed, which
+// closes a call that has not finished and hides the output that is still coming.
+func toolStatusOf(status harness.ToolStatus) events.ToolStatus {
+	switch status {
+	case harness.ToolCompleted:
+		return events.ToolCompleted
+	case harness.ToolFailed:
+		return events.ToolFailed
 	case harness.ToolInProgress:
-		// The opening event. phase already says "start".
+		return events.ToolInProgress
 	default:
-		// A status the harness added later. Publishing it as a start is the safe
-		// reading: the client shows the tool as running, which is true of any
-		// non-terminal status.
+		return events.ToolInProgress
 	}
-
-	b.bus.Publish(events.TypeSessionTool, u.SessionID, map[string]any{
-		"phase":   phase,
-		"callId":  tool.ID,
-		"tool":    name,
-		"status":  string(tool.Status),
-		"input":   tool.Input,
-		"output":  tool.Output,
-		"isError": tool.IsError,
-	})
 }
 
 // PublishState implements harness.StateSink.

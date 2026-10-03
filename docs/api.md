@@ -85,7 +85,7 @@ client does not have to probe and fail:
 {
   "id": "dev_…", "name": "iPhone", "createdAt": "…", "expiresAt": "…",
   "limits": { "maxPromptBytes": 262144, "maxBodyBytes": 8388608,
-              "maxImageBytes": 8388608, "transcriptPage": 200 },
+              "maxImageBytes": 0, "transcriptPage": 50 },
   "features": { "transcript": true, "desktopUI": false, "imagePrompts": true,
                 "approvalTimeoutSecs": 300, "sessionIdleTimeoutSec": 300,
                 "approvalGrantTTLSecs": 1800, "promptQueueDepth": 4,
@@ -519,17 +519,54 @@ session it has never attached to.
       "thinking": "…", "model": "deepseek/deepseek-v4.1-flash",
       "usage": { "inputTokens": 5195, "outputTokens": 2 } },
     { "id": "…", "seq": 38, "time": "…", "role": "tool", "tool": "bash",
-      "input": "{\"command\":\"pwd\"}", "output": "/private/tmp", "isError": false },
+      "input": "{\"command\":\"go test ./...\"}", "output": "FAIL\n[exit code: 1]",
+      "isError": false, "exitCode": 1, "endedAt": "…", "pending": false,
+      "notices": [], "inputTruncated": false, "outputTruncated": false },
+    { "id": "…", "seq": 41, "time": "…", "role": "tool", "tool": "read",
+      "input": "{\"path\":\"/Users/me/code/api/store.go\"}", "pending": true },
     { "id": "…", "seq": 4, "time": "…", "role": "notice", "text": "turn started" }
   ],
   "nextBefore": 4,
-  "truncated": false
+  "total": 42
 }
 ```
 
-`items` is oldest-first. `nextBefore` pages backwards; **`0` means there is nothing
-older**, and a client that keeps requesting with `before=0` will be handed the newest
-page again.
+`items` is oldest-first. `nextBefore` pages backwards and is **absent when there is
+nothing older**; a client that keeps requesting with `before=0` will be handed the
+newest page again. `total` is the whole transcript's length, which a page does not
+otherwise reveal.
+
+A tool item carries what the recorded result said about how the call ended, not
+just whether the harness called it an error:
+
+* `exitCode` — the command's status, **absent when the result did not say**. Zero is
+  a real status; a missing field is silence, and a client that read it as zero would
+  report a command as succeeding when nobody knows that it did.
+* `errorName` / `errorCode` — DSH's structured error, e.g. `FsError` /
+  `FS_NOT_OBSERVED`. Only the session log records these; the live ACP path does not
+  carry them.
+* `notices` — the harness's own stop markers, verbatim: `timed out after 300000ms`,
+  `killed by signal 9`, `file access denied under plan mode`.
+* `harnessTruncated` / `spillPath` — the harness cut the output itself, and where it
+  put the rest.
+* `pending` — the log holds the call and no result: the call is running now. A client
+  that ignored this would render a call in flight as a finished card with no output.
+* `endedAt` — when the result was recorded, which is what makes a duration knowable.
+
+`isError` is **not** the same question. DSH reports a command's non-zero exit rather
+than erroring, so a command that failed is recorded with `"isError": false` and a
+non-zero `exitCode`.
+
+Two fields report that this deployment bounded a payload on the way out, and both
+default to false:
+
+* `outputTruncated` — the output is longer than `limits.toolOutputBytes`; the
+  beginning and the end are kept, and the elision between them says how much is
+  missing.
+* `inputTruncated` — the arguments were longer than `limits.toolInputBytes` and had
+  their long string values clipped. The JSON stays parseable so a client can still
+  read a path, a command or the two strings an edit replaced; anything drawn from a
+  trimmed payload may be partial, and a client should say so.
 
 A message that carried images reports how many on the item:
 `"attachments": 2`. The image itself is deliberately not projected — a transcript
@@ -678,10 +715,10 @@ Server frames:
 | `type` | Meaning |
 |---|---|
 | `hello` | First frame. `data` = `{ "deviceId": …, "replayFrom": … }`. |
-| `session.state` | Session metadata changed (leased, busy, title, model). |
-| `session.message` | A committed message. `data = { id, role: "user" \| "assistant", text }`. `id` matches the transcript item id for the same message, so a client folding live events into fetched history can dedupe exactly rather than by comparing text. `role: "user"` means the prompt was typed somewhere else — the desktop, a headless run — and this client is watching it. |
+| `session.state` | Session metadata changed (leased, busy, title, model). `busy` is published by whoever can answer it and never by both: the turn scheduler for a session this gateway drives, the log watcher for one the desktop drives. A client keeps its own copy — the composer reads it to decide whether Stop belongs on screen — so a producer that changes the answer must say so. |
+| `session.message` | One row of the conversation: a committed message, or the echo of a prompt this gateway has just admitted — sent to every client, including the one that typed it, which is why the echo has to be reconcilable. `data = { id, role: "user" \| "assistant", text, thinking?, model?, usage?, attachments? }`. `id` matches the transcript item id for the same message, so a client folding live events into fetched history can dedupe exactly rather than by comparing text — **except** for the prompt echo, whose `id` is empty because the session log has not recorded the prompt yet: a client that merges history by id must let the committed row replace the echo rather than adding to it. `role: "user"` means a prompt the client did not type itself: one typed at the desk or in a headless run, or one another client of this gateway sent. `attachments` counts the non-text blocks, so a prompt that was only a screenshot does not render as an empty row. |
 | `session.thought` | A committed reasoning block, shown collapsed. `data = { id, text }`. |
-| `session.tool` | Tool lifecycle. `data.phase` = `start` \| `end`, plus `callId`, `tool`, `status`, `input`, `output`, `isError`. |
+| `session.tool` | Tool lifecycle. `data.phase` = `start` \| `end`, plus `callId`, `tool`, `status`, `input`, `output`, `isError`, and the result facts a transcript tool item carries: `exitCode`, `errorName`, `errorCode`, `notices`, `harnessTruncated`, `spillPath`, `inputTruncated`, `outputTruncated`. `status` is one of exactly three values — `in_progress`, `completed`, `failed` — and means the same thing whichever producer sent it: the ACP bridge maps the harness's own status onto them, and the log watcher derives them from the recorded result. `completed` is **not** success: DSH reports a command's non-zero exit as a status rather than an error, so `exitCode` is where the outcome actually lives. The opening frame carries the arguments; the closing frame carries the result. The gateway fills the name and the arguments back into the closing frame, because DSH's completion update repeats neither. |
 | `usage.update` | Context occupancy, **not** per-step token counts. `data = { used, size, fraction }` where `size` is the model's context window. Per-message token accounting is on transcript items. |
 | `approval.requested` | See above. |
 | `approval.resolved` | `data = { id, optionId, decidedBy, tool, sessionId, grantId }`. `decidedBy` is `operator` when a person answered, and `timeout` or `shutdown` when the tool was refused because nobody did — a client that rendered those the same way would tell the operator their agent stopped for a reason it did not. |

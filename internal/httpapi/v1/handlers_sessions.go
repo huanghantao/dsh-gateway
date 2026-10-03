@@ -571,7 +571,10 @@ func (s *Server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()), err)
 		return
 	}
-	_ = httpcore.RespondJSON(w, http.StatusOK, page)
+	// Bounded on the way out, never in the store: the change projection folds
+	// the same argument text to build diffs, so a trimmed copy there would
+	// silently cut a diff short.
+	_ = httpcore.RespondJSON(w, http.StatusOK, transcriptView(page, s.deps.Config.Limits))
 }
 
 // promptRequest is the body of POST /sessions/{id}/prompt.

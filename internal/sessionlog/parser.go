@@ -9,6 +9,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // parser folds session log events into transcript items.
@@ -448,6 +449,14 @@ func (p *parser) feedToolResult(line []byte, env envelope) {
 				IsError    bool           `json:"isError"`
 				ID         string         `json:"id"`
 			} `json:"message"`
+			// Error is DSH's structured failure, recorded beside the message:
+			// {"name":"FsError","code":"FS_NOT_OBSERVED"}. It survives the
+			// projection because a code is what a reader can act on, while the
+			// message text is prose.
+			Error struct {
+				Name string `json:"name"`
+				Code string `json:"code"`
+			} `json:"error"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
@@ -458,6 +467,10 @@ func (p *parser) feedToolResult(line []byte, env envelope) {
 	if !p.keepItems {
 		return
 	}
+	output := joinText(ev.Data.Message.Content)
+	ended := fromMillis(env.Time)
+	facts := toolresult.Observe(output).WithError(ev.Data.Error.Name, ev.Data.Error.Code).Facts()
+
 	callID := ev.Data.Message.ToolCallID
 	idx, ok := p.toolIndex[callID]
 	if !ok {
@@ -470,16 +483,20 @@ func (p *parser) feedToolResult(line []byte, env envelope) {
 			Time:    fromMillis(env.Time),
 			Role:    RoleTool,
 			Tool:    "tool",
-			Output:  joinText(ev.Data.Message.Content),
+			Output:  output,
 			IsError: ev.Data.Message.IsError,
+			EndedAt: &ended,
+			Facts:   facts,
 		})
 		return
 	}
 
 	it := &p.items[idx]
-	it.Output = joinText(ev.Data.Message.Content)
+	it.Output = output
 	it.IsError = ev.Data.Message.IsError
 	it.Pending = false
+	it.EndedAt = &ended
+	it.Facts = facts
 	// The result's sequence orders the completion, but the item keeps the call's
 	// position so the transcript reads call-then-result.
 	delete(p.toolIndex, callID)

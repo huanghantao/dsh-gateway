@@ -66,7 +66,11 @@ func TestRunningNeedsBothAnOpenTurnAndALiveWriter(t *testing.T) {
 	for _, e := range drain(sub) {
 		switch e.Type {
 		case events.TypeSessionState:
-			busy = e.Data.(map[string]any)["busy"] == true
+			state, ok := e.Data.(events.SessionBusy)
+			if !ok {
+				t.Fatalf("session.state payload = %T, want events.SessionBusy", e.Data)
+			}
+			busy = state.Busy
 		case events.TypeTurnState:
 			state, ok := e.Data.(events.TurnState)
 			if !ok {
@@ -111,9 +115,11 @@ func TestTurnBoundariesBecomeState(t *testing.T) {
 	for _, e := range got {
 		switch e.Type {
 		case events.TypeSessionState:
-			if value, ok := e.Data.(map[string]any)["busy"]; ok && value == true {
-				busy = true
+			state, ok := e.Data.(events.SessionBusy)
+			if !ok {
+				t.Fatalf("session.state payload = %T, want events.SessionBusy", e.Data)
 			}
+			busy = state.Busy
 		case events.TypeTurnState:
 			if state, ok := e.Data.(events.TurnState); ok && state.State == "running" {
 				running = true

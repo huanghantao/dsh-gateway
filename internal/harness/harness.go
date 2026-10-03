@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // State is the lifecycle state of the DSH child process.
@@ -180,8 +182,13 @@ type ToolCall struct {
 	Input string
 	// Output is the tool's textual result, when settled.
 	Output string
-	// IsError reports whether the tool failed.
+	// IsError reports whether the tool *failed* — a spawn error, an abort. It is
+	// deliberately not set for a command that merely exited non-zero: DSH
+	// reports those, and Result carries what it reported.
 	IsError bool
+	// Result is what the settled result says about how the call ended. The zero
+	// value means the result said nothing, which is not the same as success.
+	Result toolresult.Outcome
 }
 
 // Usage is context occupancy for a session, as ACP reports it.

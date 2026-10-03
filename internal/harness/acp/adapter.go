@@ -17,6 +17,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // Options configures the adapter.
@@ -711,21 +712,40 @@ func (a *Adapter) handleNotification(method string, params json.RawMessage) {
 			if u.Status == string(harness.ToolFailed) {
 				status = harness.ToolFailed
 			}
+			// The completion update carries neither a title nor rawInput —
+			// verified against DSH's own ACP projection, which sends the call id,
+			// the status and the content blocks and nothing else. Publishing what
+			// that decodes to would have the phone erase the arguments it
+			// describes the call with, so the opening update's copy is carried
+			// forward from the correlation store.
+			input, title := rawToDisplay(u.RawInput), u.Title
+			if known, ok := a.lookupToolCall(u.ToolCallID); ok {
+				if input == "" {
+					input = known.Input
+				}
+				if title == "" {
+					title = known.Title
+				}
+			}
+			output := u.text()
 			a.rememberToolCall(harness.ToolCall{
 				ID:     u.ToolCallID,
-				Title:  u.Title,
+				Title:  title,
 				Status: status,
-				Input:  rawToDisplay(u.RawInput),
+				Input:  input,
 			})
 			a.publish(harness.Update{
 				SessionID: p.SessionID, Kind: harness.UpdateTool, Time: now,
 				Tool: &harness.ToolCall{
 					ID:      u.ToolCallID,
-					Title:   u.Title,
+					Title:   title,
 					Status:  status,
-					Input:   rawToDisplay(u.RawInput),
-					Output:  u.text(),
+					Input:   input,
+					Output:  output,
 					IsError: status == harness.ToolFailed,
+					// What the result itself says: the exit status, the harness's
+					// stop markers, and whether it truncated its own output.
+					Result: toolresult.Observe(output),
 				},
 			})
 		}

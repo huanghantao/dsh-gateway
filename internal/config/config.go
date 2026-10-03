@@ -216,6 +216,18 @@ type Limits struct {
 	// A positive value caps one image below that, which is a policy about what a
 	// prompt may contain rather than a limit on the request.
 	MaxImageBytes int `yaml:"maxImageBytes"`
+	// ToolInputBytes bounds one tool call's arguments on their way to a phone.
+	//
+	// The arguments are what the client reads to say what a call did — a path, a
+	// command, which two strings an edit replaced — so they are bounded by
+	// clipping long string *values* rather than by cutting the document: see
+	// toolresult.LimitJSON for why half a JSON payload is worse than a trimmed
+	// one. The default holds every ordinary argument and trims a whole-file write.
+	ToolInputBytes int `yaml:"toolInputBytes"`
+	// ToolOutputBytes bounds one tool call's result. Both ends are kept, because
+	// the beginning is where a failure starts and the end is where the summary
+	// and the exit status are.
+	ToolOutputBytes int `yaml:"toolOutputBytes"`
 }
 
 // DesktopUI exposes the stock DSH browser GUI behind the gateway.
@@ -440,6 +452,13 @@ func Default() Config {
 			MaxPromptBytes:     256 << 10,
 			MaxConcurrentTurns: 4,
 			MaxImageBytes:      0,
+			// A tool card is read on a 390px screen, and the card scrolls inside
+			// a 45dvh box: 24 KiB of output is already hundreds of lines, and the
+			// measurement behind these numbers found single results of 57 KiB.
+			// Arguments get more room because the client parses them to describe
+			// the call, and a trimmed edit still has to diff.
+			ToolInputBytes:  64 << 10,
+			ToolOutputBytes: 24 << 10,
 		},
 		DesktopUI: DesktopUI{
 			Enabled:  false,
@@ -791,6 +810,14 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.MaxConcurrentTurns <= 0 {
 		fail("limits.maxConcurrentTurns: must be positive")
+	}
+	if c.Limits.ToolInputBytes <= 0 {
+		fail("limits.toolInputBytes: must be positive; a tool card with no arguments " +
+			"cannot say what the call did")
+	}
+	if c.Limits.ToolOutputBytes <= 0 {
+		fail("limits.toolOutputBytes: must be positive; use a large value rather than 0 " +
+			"to send results whole")
 	}
 
 	if c.DesktopUI.Enabled {
