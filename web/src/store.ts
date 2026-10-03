@@ -21,6 +21,7 @@
  *   changed, which is what keeps the conversation's per-frame work O(appended).
  */
 
+import { loadActivities, loadReadAt, unreadCount, type Activity } from "./activity.js";
 import type { Approval, ApprovalGrant, DeploymentLimits, Device, Features, FeedItem, HarnessStateData, ModelsResponse, Session, TokenUsage, Turn, Workspace } from "./types.js";
 
 /**
@@ -65,7 +66,9 @@ export type Route =
   | { readonly kind: "pair"; readonly code?: string }
   | { readonly kind: "sessions" }
   | { readonly kind: "conversation"; readonly sessionId: string }
-  | { readonly kind: "settings" };
+  | { readonly kind: "settings" }
+  /** What has finished: the record a notification only points at. */
+  | { readonly kind: "activity" };
 
 export type ConnectionStatus = "connecting" | "open" | "offline" | "closed";
 
@@ -146,6 +149,25 @@ export interface AppState {
   readonly active: ActiveSession | null;
   /** Transient, non-blocking message (e.g. "session released"). */
   readonly notice: string | null;
+
+  /**
+   * What this device has recorded, newest last. See activity.ts.
+   *
+   * It lives in the store rather than inside a view because two things read it:
+   * the activity screen, and the app bar's badge, which has to be right on every
+   * screen.
+   */
+  readonly activities: readonly Activity[];
+  /**
+   * When the reader last acknowledged what had arrived.
+   *
+   * A marker rather than a set of read ids: the list is append-only and ordered,
+   * so "everything up to this moment" is both smaller to store and impossible to
+   * get wrong as rows expire off the end.
+   */
+  readonly activityReadAt: string | null;
+  /** How many recorded activities are newer than the marker. */
+  readonly activityUnread: number;
 }
 
 class Store<S extends object> {
@@ -212,6 +234,9 @@ export type AppStore = Store<AppState>;
 const NO_MODELS: ModelsResponse = decodeModels(null);
 
 function createAppState(): AppState {
+  const storage = localStore();
+  const activities = loadActivities(storage);
+  const activityReadAt = loadReadAt(storage);
   return {
     boot: "starting",
     bootError: null,
@@ -242,7 +267,26 @@ function createAppState(): AppState {
     approvalError: null,
     active: null,
     notice: null,
+    activities,
+    activityReadAt,
+    activityUnread: unreadCount(activities, activityReadAt),
   };
+}
+
+/**
+ * The browser's storage, or null where touching it throws.
+ *
+ * Safari in a private window and a page with storage disabled both make
+ * `localStorage` itself throw on access, so the activity list treats storage as
+ * an optimisation rather than a dependency: without it the screen still works
+ * for as long as the tab lives.
+ */
+export function localStore(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
 }
 
 export function createStore(): AppStore {

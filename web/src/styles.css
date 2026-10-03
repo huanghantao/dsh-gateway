@@ -180,6 +180,160 @@ body {
   color: var(--text-muted);
 }
 
+/* --------------------------------------------------------------- activity */
+
+/* The bell and its badge. The count is the one number this app volunteers:
+   things that finished while the reader was looking elsewhere. */
+.app-bar-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-bell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 32px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.app-bell:active {
+  background: var(--bg-sunken);
+}
+.app-bell.has-unread {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-sunken);
+}
+.bell-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+.bell-count {
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.app-bell.has-unread .bell-count {
+  color: var(--accent);
+}
+
+.view-activity .scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.activity-header {
+  padding: 8px 2px 4px;
+}
+.activity-title {
+  margin: 0 0 4px;
+  font-size: 1.15rem;
+}
+.activity-read {
+  margin-top: 8px;
+}
+
+.activity-item {
+  margin: 0;
+}
+
+/*
+ * A row is one button, so the whole width is the tap target. Its three lines
+ * answer the three questions in order — who, what it amounted to, which
+ * conversation — with the outcome badge beside the actor, because those two
+ * together are what a reader scans for.
+ */
+.activity-row {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.activity-row:active {
+  background: var(--bg-sunken);
+}
+.activity-row.is-unread {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.activity-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.activity-actor {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunken);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.activity-actor.is-subagent {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.activity-outcome {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+.activity-outcome.is-completed {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.activity-outcome.is-failed,
+.activity-outcome.is-expired {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.activity-outcome.is-cancelled,
+.activity-outcome.is-waiting {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.activity-time {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.activity-summary {
+  margin: 0;
+  font-size: 0.92rem;
+}
+.activity-detail {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.activity-session {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 .view-root {
   position: relative;
   flex: 1 1 auto;
@@ -1225,6 +1379,75 @@ body {
 .notice-time {
   margin-right: 6px;
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * A report from an agent, as opposed to an annotation the app made.
+ *
+ * The harness delivers a delegated task's settlement as a *user* message, so
+ * without this it is drawn exactly like something the operator typed — same
+ * bubble, same "You". The row below is the correction: it is left-aligned like
+ * a report and never like a prompt, it names the agent that sent it, and its
+ * head is the thing a reader scans for.
+ */
+.notice-report-row {
+  margin: 2px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  text-align: left;
+}
+.notice-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.notice-actor {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.notice-outcome {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.notice-outcome.is-completed {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.notice-outcome.is-failed {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.notice-outcome.is-cancelled {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.notice-subject {
+  margin: 0 0 4px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.notice-report {
+  font-size: 0.85rem;
+}
+.notice-report > :first-child {
+  margin-top: 0;
+}
+.notice-report > :last-child {
+  margin-bottom: 0;
 }
 
 .turn-status {

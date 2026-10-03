@@ -19,12 +19,14 @@
  * rows collapse instead of doubling.
  */
 
+import { parseSettlement } from "./settlement.js";
 import type {
   FeedItem,
   FeedMessageItem,
   FeedNoticeItem,
   FeedToolItem,
   MessageData,
+  NoticeOutcome,
   Session,
   SessionPatch,
   TokenUsage,
@@ -41,7 +43,16 @@ export function feedFromTranscript(items: readonly TranscriptItem[]): readonly F
   const feed: FeedItem[] = [];
   for (const item of items) {
     switch (item.role) {
-      case "user":
+      case "user": {
+        // A background subagent's settlement is committed as a *user* message by
+        // the harness, because it is delivered to the model as one. Rendering it
+        // as one would show the reader a report from their child agent wearing
+        // their own name, so it is read here and folded as the notice it is.
+        const report = settlementNotice(`msg:${item.id}`, item.text ?? "", item.time);
+        if (report !== null) {
+          feed.push(report);
+          break;
+        }
         feed.push({
           key: `msg:${item.id}`,
           kind: "message",
@@ -54,6 +65,7 @@ export function feedFromTranscript(items: readonly TranscriptItem[]): readonly F
           attachments: item.attachments,
         });
         break;
+      }
       case "assistant":
         feed.push({
           key: `msg:${item.id}`,
@@ -86,12 +98,10 @@ export function feedFromTranscript(items: readonly TranscriptItem[]): readonly F
         });
         break;
       case "notice":
-        feed.push({
-          key: `hist-notice:${item.id}`,
-          kind: "notice",
-          time: item.time,
-          text: item.text ?? "",
-        });
+        // A settlement is keyed the way the live stream keys it, not the way
+        // this route keys its own annotations: both describe the same row, and
+        // the whole point of the key is that the fold collapses them.
+        feed.push(noticeItem(item.actor === null ? `hist-notice:${item.id}` : `msg:${item.id}`, item));
         break;
     }
   }
@@ -290,6 +300,13 @@ export function appendMessage(feed: readonly FeedItem[], data: MessageData, time
   ) {
     return feed;
   }
+  // A settlement that arrives live takes the same route as one read back from
+  // history: the two must produce the same row, or a reconnect would redraw it
+  // differently.
+  if (data.role === "user") {
+    const report = settlementNotice(key, data.text, time);
+    if (report !== null) return [...feed, report];
+  }
   return [
     ...feed,
     {
@@ -306,8 +323,92 @@ export function appendMessage(feed: readonly FeedItem[], data: MessageData, time
   ];
 }
 
+/**
+ * Reads one committed user message as a delegated task's settlement, or null
+ * when it is a prompt a person typed.
+ *
+ * The actor is deliberately unnamed here. The harness's settlement names the
+ * child by id and says nothing about the task it was given — that is the whole
+ * complaint about this message shape — so the name has to come from the
+ * delegation tool call, which the activity fold has and a pure transcript
+ * projection does not. A row built from history therefore reads
+ * "Subagent · completed" and one built from live events reads
+ * "Subagent · Audit the handlers · completed"; both are honest, and the second
+ * is the one the reader gets while it happens.
+ */
+export function settlementNotice(key: string, text: string, time: string | null): FeedNoticeItem | null {
+  const settlement = parseSettlement(text);
+  if (settlement === null) return null;
+  return {
+    key: `${key}:settled`,
+    kind: "notice",
+    time,
+    text: settlement.report,
+    actor: { kind: "subagent", name: "" },
+    outcome: settlement.outcome,
+    summary: settlement.subject,
+    detail: settlement.report,
+  };
+}
+
+/**
+ * Builds a notice row from a transcript item.
+ *
+ * Two sources of truth, in order of authority. A settlement the *log* recorded
+ * carries the harness's own typed account — who settled, its summary sentence,
+ * how it went — and that is read verbatim. A settlement that reached this client
+ * as a live user-role message has no such envelope (ACP carries no subagent
+ * scope at all; it is an open RFD), so it falls back to reading the prose. Both
+ * produce the same row shape, which is what keeps history and the live stream
+ * from disagreeing about the same event.
+ */
+function noticeItem(key: string, item: TranscriptItem): FeedNoticeItem {
+  if (item.actor === "subagent") {
+    return {
+      // The same key the live stream gives this settlement. The two routes
+      // overlap for a moment whenever a session is opened or refetched, and a
+      // key that differed would show the child's report twice.
+      key: `${key}:settled`,
+      kind: "notice",
+      time: item.time,
+      text: item.text ?? "",
+      actor: { kind: "subagent", name: "" },
+      outcome: noticeOutcome(item.outcome),
+      summary: item.summary ?? "",
+      detail: item.text ?? "",
+    };
+  }
+  return {
+    key,
+    kind: "notice",
+    time: item.time,
+    text: item.text ?? "",
+    actor: null,
+    outcome: null,
+    summary: "",
+    detail: "",
+  };
+}
+
+/** Narrows an outcome word off the wire, defaulting to "no claim". */
+function noticeOutcome(value: string | null): NoticeOutcome | null {
+  switch (value) {
+    case "completed":
+    case "failed":
+    case "cancelled":
+    case "expired":
+    case "waiting":
+      return value;
+    default:
+      return null;
+  }
+}
+
 export function appendNotice(feed: readonly FeedItem[], text: string, time: string, seq: number): readonly FeedItem[] {
-  return [...feed, { key: `notice:${seq}`, kind: "notice", time, text }];
+  return [
+    ...feed,
+    { key: `notice:${seq}`, kind: "notice", time, text, actor: null, outcome: null, summary: "", detail: "" },
+  ];
 }
 
 /** Usage for the header: the authoritative total, else the newest reported. */

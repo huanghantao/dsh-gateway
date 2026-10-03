@@ -71,9 +71,30 @@ const (
 	RoleNotice Role = "notice"
 )
 
+// The actors a notice can be about. The words are the wire vocabulary, shared
+// with the push package's actor kinds so that one client vocabulary covers a
+// notification and a transcript row.
+const (
+	// ActorSubagent marks a delegated child agent's own report.
+	ActorSubagent = "subagent"
+)
+
+// How a settled thing ended. They appear on a notice's Outcome so a client can
+// colour a row without reading the prose.
+const (
+	OutcomeCompleted = "completed"
+	OutcomeFailed    = "failed"
+	OutcomeCancelled = "cancelled"
+)
+
+// sourceSubagentSettled is DSH's source kind for the notice it writes when a
+// background child agent settles. The harness calls it out as a distinct kind so
+// that a transcript never presents a runtime account as something the child
+// wrote, and reading it is what lets this projection do the same.
+const sourceSubagentSettled = "subagent-settled"
+
 // Item is one rendered transcript entry.
-type Item struct {
-	// ID is stable across reads, so a client can key a list on it.
+type Item struct { // ID is stable across reads, so a client can key a list on it.
 	ID string `json:"id"`
 	// Seq is the log sequence number, used for paging.
 	Seq int64 `json:"seq"`
@@ -118,6 +139,23 @@ type Item struct {
 	// place to look one up in full. What matters for reading history is that a
 	// prompt was not only its words.
 	Attachments int `json:"attachments,omitempty"`
+
+	// Actor names which agent a notice is about, when it is about one.
+	//
+	// It is empty for the app's own annotations and "subagent" for a delegated
+	// task's settlement — the one case where the log records *who* finished. The
+	// distinction is the whole point: a session can run several agents, and a
+	// reader who cannot tell a child's report from the main agent's progress has
+	// no way to know what just happened.
+	Actor string `json:"actor,omitempty"`
+	// Summary is the harness's own one-line account of a notice: for a
+	// settlement, the sentence naming the child that settled. It is passed
+	// through rather than re-derived, because the harness already wrote it and a
+	// second wording would be a second thing to keep in step.
+	Summary string `json:"summary,omitempty"`
+	// Outcome is how the settled thing ended: "completed", "failed",
+	// "cancelled". Empty for a notice that is not a settlement.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 // Usage is token accounting for one assistant message.

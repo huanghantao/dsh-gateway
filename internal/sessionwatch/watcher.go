@@ -448,10 +448,28 @@ func (w *Watcher) publishItem(sessionID string, item sessionlog.Item, update boo
 		}
 
 	case sessionlog.RoleNotice:
-		// Turn boundaries and other annotations are bookkeeping; the phone shows
-		// them only in history, where they are already rendered from the same
-		// projection.
+		// Most notices are bookkeeping — a turn boundary, a stop marker — and the
+		// phone shows them only in history.
+		//
+		// A *settlement* is not. It is the one notice the operator is waiting for:
+		// a delegated child agent finishing, recorded by the harness with a
+		// typed source and its own summary. It reaches the stream as the user-role
+		// message the harness committed, which is how the client already reads
+		// live settlements for a session this gateway drives — one shape on both
+		// producers, so the row is drawn the same way whichever end ran the turn.
+		if item.Actor != "" {
+			w.publishMessage(sessionID, events.MessageData{
+				ID:   item.ID,
+				Role: "user",
+				Text: item.Text,
+			})
+		}
 	}
+}
+
+// publishMessage emits one committed message row.
+func (w *Watcher) publishMessage(sessionID string, data events.MessageData) {
+	w.opts.Bus.Publish(events.TypeSessionMessage, sessionID, data)
 }
 
 // publishTool emits one tool lifecycle frame, bounded by the deployment's

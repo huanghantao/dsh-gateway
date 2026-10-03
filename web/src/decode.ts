@@ -511,6 +511,12 @@ function decodeTranscriptItem(value: unknown): TranscriptItem | null {
     pending: asBoolean(field(value, "pending"), false),
     endedAt: asStringOrNull(field(value, "endedAt")),
     attachments: asNumber(field(value, "attachments"), 0),
+    // The harness's own account of a settlement: who settled, its one-line
+    // summary, and how it went. Absent on the wire for the harness's bookkeeping
+    // annotations, which are not reports about anybody.
+    actor: asStringOrNull(field(value, "actor")),
+    summary: asStringOrNull(field(value, "summary")),
+    outcome: asStringOrNull(field(value, "outcome")),
     ...decodeResultFacts(value),
   };
 }

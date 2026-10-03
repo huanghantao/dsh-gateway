@@ -244,8 +244,16 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 	requestApproval(t, bus, "session-long", "apr_1", "bash")
 	waitFor(t, func() bool { return len(rec.received()) >= 2 }, "a notification for the approval")
 	approval := rec.received()[1]
-	if approval.Title == "" || !strings.Contains(approval.Body, "bash") {
-		t.Errorf("approval message = %+v, want the tool named", approval)
+	// The tool is named in the title, which is the line a reader sees first and
+	// the one that has to distinguish "approve bash?" from "approve write?".
+	if approval.Title == "" || !strings.Contains(approval.Title, "bash") {
+		t.Errorf("approval message = %+v, want the tool named in the title", approval)
+	}
+	if approval.Actor == nil || approval.Actor.Kind != push.ActorMain {
+		t.Errorf("approval actor = %+v, want the main agent: it is the agent that is blocked", approval.Actor)
+	}
+	if approval.Outcome != "waiting" {
+		t.Errorf("approval outcome = %q, want %q", approval.Outcome, "waiting")
 	}
 	if got := rec.urgencies[1]; got != "high" {
 		t.Errorf("approval urgency = %q, want high: it expires", got)
@@ -261,58 +269,74 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 // TestNotificationNamesSessionOnlyWhenAsked pins the default that keeps a
 // notification from carrying the operator's own words.
 //
-// The body is the one part of this system that is displayed on a lock screen and
-// mirrored to third-party chat services, so "does it name the session" is a
-// privacy property rather than a formatting choice, and it is worth a test that
-// fails loudly if a future edit makes the name unconditional again.
+// The text is the part of this system that is displayed on a lock screen and
+// mirrored to third-party chat services, so "where does the session name appear"
+// is a privacy property rather than a formatting choice, and it is worth a test
+// that fails loudly if a future edit makes the name unconditional again.
+//
+// The two places are deliberately different. The *title* names the session
+// whenever the deployment has a Describe at all, because two notifications from
+// two sessions are otherwise the same line of text — that is the confusion this
+// vocabulary removes. The *body* carries the operator's words only on request.
 func TestNotificationNamesSessionOnlyWhenAsked(t *testing.T) {
 	const title = "Refactor the retry logic"
 
 	cases := []struct {
-		name    string
-		include bool
-		state   string
-		want    string
-		absent  string
+		name        string
+		include     bool
+		state       string
+		wantBody    string
+		wantTitle   string
+		bodyAbsent  string
+		titleAbsent string
 	}{
 		{
-			name:    "off by default, and a finished turn still says so",
-			include: false,
-			state:   "completed",
-			want:    "Open the session for the result.",
-			absent:  title,
+			name:       "off by default, and a finished turn still says so",
+			include:    false,
+			state:      "completed",
+			wantBody:   "Open the session for the result.",
+			wantTitle:  "completed · Main agent · " + title,
+			bodyAbsent: title,
 		},
 		{
-			name:    "off, and a failure is still distinguishable",
-			include: false,
-			state:   "failed",
-			want:    "Open the session for the error.",
-			absent:  title,
+			name:       "off, and a failure is still distinguishable",
+			include:    false,
+			state:      "failed",
+			wantBody:   "Open the session for the error.",
+			wantTitle:  "failed · Main agent · " + title,
+			bodyAbsent: title,
 		},
 		{
-			name:    "opted in, the title is used verbatim",
-			include: true,
-			state:   "completed",
-			want:    title,
+			name:      "opted in, the body carries the session too",
+			include:   true,
+			state:     "completed",
+			wantBody:  title,
+			wantTitle: "completed · Main agent · " + title,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body := longTurnBody(t, tc.include, tc.state, title)
-			if body != tc.want {
-				t.Errorf("body = %q, want %q", body, tc.want)
+			body, gotTitle := longTurnMessage(t, tc.include, tc.state, title)
+			if body != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
 			}
-			if tc.absent != "" && strings.Contains(body, tc.absent) {
-				t.Errorf("body = %q, must not contain %q", body, tc.absent)
+			if gotTitle != tc.wantTitle {
+				t.Errorf("title = %q, want %q", gotTitle, tc.wantTitle)
+			}
+			if tc.bodyAbsent != "" && strings.Contains(body, tc.bodyAbsent) {
+				t.Errorf("body = %q, must not contain %q", body, tc.bodyAbsent)
+			}
+			if tc.titleAbsent != "" && strings.Contains(gotTitle, tc.titleAbsent) {
+				t.Errorf("title = %q, must not contain %q", gotTitle, tc.titleAbsent)
 			}
 		})
 	}
 }
 
-// longTurnBody runs one long turn through the real notifier and returns the body
-// it delivered.
-func longTurnBody(t *testing.T, includeName bool, state, title string) string {
+// longTurnMessage runs one long turn through the real notifier and returns the
+// title and body it delivered.
+func longTurnMessage(t *testing.T, includeName bool, state, title string) (string, string) {
 	t.Helper()
 
 	rec := newReceiver(t)
@@ -363,7 +387,8 @@ func longTurnBody(t *testing.T, includeName bool, state, title string) string {
 	})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for a long turn")
-	return rec.received()[0].Body
+	message := rec.received()[0]
+	return message.Body, message.Title
 }
 
 // watchedClock is a clock that counts its reads, so a test can wait for the

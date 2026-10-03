@@ -66,6 +66,10 @@ web/
     types.ts            hand-written mirror of docs/api.md
     feed.ts             folds transcript pages and live frames into one list,
                         and turns that list into rows (grouping runs of tools)
+    activity.ts         what has finished, kept on the device: who settled, how
+                        it went, what it amounted to
+    settlement.ts       reads the harness's own account of a delegated task,
+                        which is prose because ACP has no subagent scope
     rows.ts             keyed row reconciler: mounts once, updates in place
     copybutton.ts       the copy control, shared by code blocks and tool cards
     markdown.ts         small safe Markdown renderer (builds DOM nodes)
@@ -86,6 +90,7 @@ web/
       feedrows.ts       row kinds -> nodes (message, tool, tool run, notice)
       approval.ts       screen 4 (mounted globally, not inside a view)
       settings.ts       screen 5
+      activity.ts       screen 6, reached from the app bar's bell
       ui.ts             shared badge / bottom sheet / select
   dist/                 build output, generated and gitignored; this is what Go embeds
 ```

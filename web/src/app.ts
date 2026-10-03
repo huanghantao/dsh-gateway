@@ -25,6 +25,7 @@ import { mountApprovals } from "./views/approval.js";
 import { mountConversation } from "./views/conversation.js";
 import { mountPair } from "./views/pair.js";
 import { mountSessions } from "./views/sessions.js";
+import { mountActivity } from "./views/activity.js";
 import { mountSettings } from "./views/settings.js";
 
 const CONNECTION_LABEL: Record<ConnectionStatus, string> = {
@@ -107,11 +108,34 @@ export function main(): void {
   /* --------------------------------------------------------------- shell */
 
   const statusPill = el("span", { class: "status-pill" });
+  /**
+   * The way into the activity screen, and the only place the app says "something
+   * happened while you were elsewhere".
+   *
+   * It lives in the app bar rather than the tab bar because it is not a section
+   * the reader lives in — it is a place they are sent, by a badge. The count is
+   * rendered as text in a live region so a screen reader is told too.
+   */
+  const bellCount = el("span", { class: "bell-count" });
+  const bell = el(
+    "button",
+    {
+      class: "app-bell",
+      attrs: { type: "button", "aria-label": "Activity" },
+      on: {
+        click: () => {
+          ctx.navigate({ kind: "activity" });
+        },
+      },
+    },
+    el("span", { class: "bell-icon", attrs: { "aria-hidden": "true" }, text: "◔" }),
+    bellCount,
+  );
   const appBar = el(
     "header",
     { class: "app-bar" },
     el("span", { class: "app-name", text: "dsh-gateway" }),
-    el("span", { class: "status", attrs: { role: "status", "aria-live": "polite" } }, statusPill),
+    el("span", { class: "app-bar-end" }, bell, el("span", { class: "status", attrs: { role: "status", "aria-live": "polite" } }, statusPill)),
   );
 
   const viewRoot = el("main", { class: "view-root", attrs: { id: "view-root" } });
@@ -277,6 +301,10 @@ export function main(): void {
         if (state.active !== null) ctx.closeSession();
         show(mountSettings);
         return;
+      case "activity":
+        if (state.active !== null) ctx.closeSession();
+        show(mountActivity);
+        return;
       case "conversation":
         openConversation(state.route.sessionId);
         show(mountConversation);
@@ -326,6 +354,21 @@ export function main(): void {
     },
   );
 
+  const offUnread = store.select(
+    (state) => state.activityUnread,
+    (unread) => {
+      // The badge is a count of *things that finished*, which is the one number
+      // this app can put in front of someone without being asked. Above nine it
+      // stops being a number and becomes "there are several".
+      bellCount.textContent = unread === 0 ? "" : unread > 9 ? "9+" : String(unread);
+      bell.classList.toggle("has-unread", unread > 0);
+      bell.setAttribute(
+        "aria-label",
+        unread === 0 ? "Activity" : `Activity, ${unread} unread`,
+      );
+    },
+  );
+
   const offHash = on(window, "hashchange", () => {
     const next = routeFromHash(window.location.hash);
     if (!sameRoute(next, store.state.route)) store.patch({ route: next });
@@ -358,6 +401,7 @@ export function main(): void {
     offRoute();
     offStatus();
     offNotice();
+    offUnread();
     offHash();
     offOnline();
     offOffline();

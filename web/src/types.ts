@@ -404,6 +404,17 @@ export interface TranscriptItem extends ToolResultFacts, ToolTrim {
    * attached rather than pretending the words were the whole message.
    */
   readonly attachments: number;
+  /**
+   * role === "notice" only: which agent the notice is about.
+   *
+   * "subagent" for a delegated task's settlement, which the log records with its
+   * own typed source; null for the harness's bookkeeping annotations. When it is
+   * set, `summary` and `outcome` are too, and they are read rather than parsed —
+   * the harness wrote them.
+   */
+  readonly actor: string | null;
+  readonly summary: string | null;
+  readonly outcome: string | null;
 }
 
 export interface TranscriptResponse {
@@ -776,6 +787,24 @@ export type Readiness = "ready" | "starting" | "down";
 /* -------------------------------------------------------- conversation feed */
 
 /**
+ * Who a notification or a notice is about.
+ *
+ * It mirrors `push.Actor` on the gateway, which is where the vocabulary is
+ * defined: one session can run several agents, and a row that does not say which
+ * one it belongs to is the ambiguity the field exists to remove.
+ */
+export type ActorKind = "main" | "subagent" | "system";
+
+export interface Actor {
+  readonly kind: ActorKind;
+  /** The task a delegation was given; empty for the main agent. */
+  readonly name: string;
+}
+
+/** How a piece of work ended, for colour and for one word of prose. */
+export type NoticeOutcome = "completed" | "failed" | "cancelled" | "expired" | "waiting";
+
+/**
  * One rendered row of the conversation. History and live events are folded into
  * the same list so a view never has to know which source a row came from.
  *
@@ -824,6 +853,22 @@ export type FeedItem =
       readonly kind: "notice";
       readonly time: string | null;
       readonly text: string;
+      /**
+       * Who the notice is about, when the row is a report from an agent rather
+       * than an annotation the app made.
+       *
+       * A notice with no actor is the app talking to itself — "the turn was
+       * stopped" — and renders as a quiet line. A notice *with* one is an agent
+       * reporting something, and renders as that agent: the whole point being
+       * that a reader can tell the main agent's progress from a delegated
+       * child's without reading the prose.
+       */
+      readonly actor: Actor | null;
+      readonly outcome: NoticeOutcome | null;
+      /** What the work amounted to, when there is something to count. */
+      readonly summary: string;
+      /** A report's body, kept whole for the row that shows it. */
+      readonly detail: string;
     };
 
 export type FeedMessageItem = Extract<FeedItem, { kind: "message" }>;

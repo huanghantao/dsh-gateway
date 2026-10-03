@@ -113,9 +113,61 @@ Revoking the calling device's own id is allowed and takes effect immediately.
 Web Push, so a phone that is not looking still learns what it cannot afford to
 miss: an approval waiting on a human, an approval that **expired** and was
 therefore refused, a turn that finished after running longer than
-`push.turnThreshold`, a turn that **failed** at any length, and the agent process
-giving up. An expiry is the one worth calling out: the operator who missed the
-first notification would otherwise never learn that the tool did not run.
+`push.turnThreshold`, a turn that **failed** at any length, a **delegated task**
+that settled (see below), and the agent process giving up. An expiry is the one
+worth calling out: the operator who missed the first notification would otherwise
+never learn that the tool did not run.
+
+### What a notification says
+
+A notification is a sentence — `title` and `body` — plus the same facts in
+structured form, because the sentence alone made every notification look alike: a
+reader could see that *something* had finished, never that it was a delegated
+child rather than the main agent, and never what the work amounted to.
+
+```json
+{
+  "title": "completed · Subagent · Research deps",
+  "body": "Research deps · 12 tool calls · 3 files changed",
+  "url": "./#/sessions/…",
+  "tag": "task-call_abc",
+  "sessionId": "…",
+  "actor": { "kind": "subagent", "name": "Research deps" },
+  "summary": "12 tool calls · 3 files changed",
+  "outcome": "completed"
+}
+```
+
+* `actor` is **who the notification is about**: `main` for the session's own
+  agent, `subagent` for a delegation (named by the task it was given when
+  `push.includeTaskNames` is on), `system` for the gateway itself. It is what
+  makes two notifications distinguishable without opening the app.
+* `summary` is what the work amounted to, counted from the tool calls that
+  settled during it — `12 tool calls · 3 files changed · 1 failure`. A non-zero
+  exit counts as a failure here, because DSH reports one as a status rather than
+  an error.
+* `outcome` is one word: `completed`, `failed`, `cancelled`, `waiting` (an
+  approval), `expired`.
+* `tag` is what collapses repeats. A turn's tag is per session and a delegation's
+  is per call, so a child settling never replaces the notification about the turn
+  that spawned it.
+
+A delegated task settles when its tool call does, which is usually **before** the
+parent turn ends: the point of delegating is that the answer exists while the main
+agent is still working. It is notified on the same rule as a turn — long enough to
+be worth an interruption, or failed at any length — and every notification is
+mirrored to chat channels when any are configured, including the short ones Web
+Push stays silent about.
+
+### Session naming and privacy
+
+The title names the session when the deployment has one to name, which is what
+makes two notifications from two sessions distinguishable at a glance. The `body`
+carries the operator's own words only with `push.includeSessionName`, and a
+delegated task is named only with `push.includeTaskNames` (on by default: without
+it, three subagents finishing in one session produce three identical "Subagent
+finished" notifications). Both are read on a lock screen and mirrored to any
+configured webhook, which is why they are switches.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -524,7 +576,10 @@ session it has never attached to.
       "notices": [], "inputTruncated": false, "outputTruncated": false },
     { "id": "…", "seq": 41, "time": "…", "role": "tool", "tool": "read",
       "input": "{\"path\":\"/Users/me/code/api/store.go\"}", "pending": true },
-    { "id": "…", "seq": 4, "time": "…", "role": "notice", "text": "turn started" }
+    { "id": "…", "seq": 4, "time": "…", "role": "notice", "text": "turn started" },
+    { "id": "…", "seq": 446, "time": "…", "role": "notice", "actor": "subagent",
+      "summary": "Background subagent … finished and will do no further work unless you send it more.",
+      "outcome": "completed", "text": "Report delivered to the parent agent. …" }
   ],
   "nextBefore": 4,
   "total": 42
@@ -535,6 +590,22 @@ session it has never attached to.
 nothing older**; a client that keeps requesting with `before=0` will be handed the
 newest page again. `total` is the whole transcript's length, which a page does not
 otherwise reveal.
+
+An `item` with `"role": "notice"` is an annotation rather than a message, and it
+comes in two kinds. `actor` says which: it is **absent** for the harness's own
+bookkeeping (a turn boundary, a stop marker), and `"subagent"` for a delegated
+child agent's settlement — the one notice that is *about* somebody. A settlement
+also carries the harness's `summary` sentence and its `outcome`
+(`completed` / `failed` / `cancelled`), read from the typed source DSH records for
+it, with the child's closing message as `text`.
+
+This matters because DSH delivers that settlement as a **user-role** message with
+no envelope, so a client that renders user rows as prompts shows the reader their
+child agent's report wearing their own name. A client should render a settled
+notice as the agent that sent it. The live path carries the same text as a
+`session.message` with `role: "user"` — ACP has no subagent scope, so the
+envelope exists only in the log — and a client folding both must key them the
+same way, or opening a session will show one child's report twice.
 
 A tool item carries what the recorded result said about how the call ended, not
 just whether the harness called it an error:

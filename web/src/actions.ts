@@ -18,6 +18,7 @@
  *   the second recovers the present it can no longer infer.
  */
 
+import { recordActivity, saveActivities, saveReadAt, unreadCount, type Activity, type Outcome } from "./activity.js";
 import { ApiError, ERROR_CODES, api, isAbortError } from "./api.js";
 import { EventClient } from "./events.js";
 import {
@@ -31,8 +32,9 @@ import {
   mergeSessionPatch,
 } from "./feed.js";
 import { normalizePairingCode } from "./format.js";
+import { parseSettlement, type Settlement } from "./settlement.js";
 import type { ActiveSession, AppState, AppStore, Route } from "./store.js";
-import { NO_FEATURES, NO_LIMITS, withSession } from "./store.js";
+import { NO_FEATURES, NO_LIMITS, localStore, withSession } from "./store.js";
 import type {
   Approval,
   ApprovalGranted,
@@ -220,12 +222,178 @@ export interface Ctx {
 
   reconnect(): void;
   setNotice(text: string | null): void;
+  /** Marks every recorded activity as read. */
+  markActivitiesRead(): void;
   handleEvent(event: ServerEvent): void;
   /** The stream may have missed frames; refetch what the app is showing. */
   handleStale(): void;
 }
 
+/** One delegation the gateway reported, remembered so its settlement can be named. */
+interface DelegateRecord {
+  readonly callId: string;
+  readonly task: string;
+  /** A settlement has already claimed this name; a second must not reuse it. */
+  used: boolean;
+}
+
+/** The tools that run a child agent. Mirrors the gateway's own list. */
+const DELEGATION_TOOLS: readonly string[] = ["subagent", "subagent_fork", "workflow"];
+/** The tools whose arguments record a file mutation. Mirrors the gateway's list. */
+const FILE_TOOLS: readonly string[] = ["edit", "write"];
+
+/**
+ * The bare name of a tool, with a producer's decoration stripped.
+ *
+ * The ACP bridge sends what the harness called the call, which may be namespaced
+ * (`mcp__server__subagent`); a stray prefix must not hide a delegation.
+ */
+function bareToolName(tool: string): string {
+  const lowered = tool.trim().toLowerCase();
+  const afterNamespace = lowered.includes("__") ? lowered.slice(lowered.lastIndexOf("__") + 2) : lowered;
+  const afterColon = afterNamespace.includes(":") ? afterNamespace.slice(afterNamespace.lastIndexOf(":") + 1).trim() : afterNamespace;
+  return afterColon;
+}
+
+/** The task a delegation was given, read from its arguments. */
+function delegateTask(input: string | null): string {
+  if (input === null || input.trim() === "") return "";
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (typeof parsed !== "object" || parsed === null) return "";
+    const args = parsed as Record<string, unknown>;
+    const description = typeof args["description"] === "string" ? args["description"].trim() : "";
+    if (description !== "") return description;
+    const prompt = typeof args["prompt"] === "string" ? args["prompt"] : "";
+    const first = prompt.split(/\r?\n/)[0]?.trim() ?? "";
+    return first;
+  } catch {
+    return "";
+  }
+}
+
+/** One countable fact about a settled call, as the gateway counts them. */
+interface CallFact {
+  readonly tool: string;
+  readonly failed: boolean;
+}
+
+/**
+ * What a turn amounted to, in the same words the gateway's notifications use.
+ *
+ * The count is kept client-side rather than sent on the frame so that the row a
+ * reader sees in the app and the notification that reached their lock screen say
+ * the same thing, from the same definitions.
+ */
+function digestSummary(calls: readonly CallFact[]): string {
+  if (calls.length === 0) return "";
+  const edits = calls.filter((call) => FILE_TOOLS.includes(bareToolName(call.tool))).length;
+  const delegations = calls.filter((call) => DELEGATION_TOOLS.includes(bareToolName(call.tool))).length;
+  const failed = calls.filter((call) => call.failed).length;
+  const parts = [`${calls.length} tool call${calls.length === 1 ? "" : "s"}`];
+  if (edits > 0) parts.push(`${edits} file${edits === 1 ? "" : "s"} changed`);
+  if (delegations > 0) parts.push(`${delegations} delegation${delegations === 1 ? "" : "s"}`);
+  if (failed > 0) parts.push(`${failed} failure${failed === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+/** The outcome word for a settled call. */
+function callFailed(isError: boolean, exitCode: number | null): boolean {
+  return isError || (exitCode !== null && exitCode !== 0);
+}
+
 export function createContext(store: AppStore, events: EventClient): Ctx {
+  /**
+   * What the gateway has told us about delegated tasks, most recent last.
+   *
+   * A settlement message names its child by id and never by task — see
+   * settlement.ts — so the only place a task's name exists is the delegation
+   * tool call that started it. This is where the two are joined.
+   */
+  const delegates = new Map<string, DelegateRecord[]>();
+  /** Tool calls that settled during the current turn, per session. */
+  const turnDigests = new Map<string, CallFact[]>();
+
+  /**
+   * Commits one activity and writes it to this device.
+   *
+   * The store updater stays pure — the side effect happens once, before it — so
+   * a re-run of the updater cannot double a browser write.
+   */
+  const record = (activity: Activity): void => {
+    const next = recordActivity(store.state.activities, activity);
+    if (next === store.state.activities) return;
+    saveActivities(localStore(), next);
+    store.set((state) => ({ ...state, activities: next, activityUnread: unreadCount(next, state.activityReadAt) }));
+  };
+
+  /**
+   * Names a settlement's child with the task from the delegation that started it.
+   *
+   * The settlement itself never says — it names the child by session id — so the
+   * name is claimed from the matching delegation, most recent first. A name is
+   * claimed once: two children settling in a row must not both be reported as
+   * whichever task happened to be last.
+   */
+  const claimDelegateTask = (sessionId: string): string => {
+    const known = delegates.get(sessionId);
+    if (known === undefined) return "";
+    for (let index = known.length - 1; index >= 0; index -= 1) {
+      const record = known[index];
+      if (record !== undefined && !record.used && record.task !== "") {
+        record.used = true;
+        return record.task;
+      }
+    }
+    return "";
+  };
+
+  const turnActivity = (sessionId: string, turn: TurnStateData, time: string): Activity => {
+    const outcome: Outcome = turn.state === "failed" ? "failed" : turn.state === "cancelled" ? "cancelled" : "completed";
+    const calls = turnDigests.get(sessionId) ?? [];
+    // The turn is over; the next one starts from an empty ledger.
+    turnDigests.delete(sessionId);
+    return {
+      id: `${sessionId}:turn:${turn.turnId === "" ? time : turn.turnId}`,
+      kind: "turn",
+      actor: { kind: "main", name: "" },
+      outcome,
+      sessionId,
+      time,
+      summary: digestSummary(calls),
+      detail: outcome === "cancelled" ? "" : (turn.detail ?? turn.stopReason ?? ""),
+    };
+  };
+
+  const subagentActivity = (
+    sessionId: string,
+    settlement: Settlement,
+    time: string,
+    seq: number,
+  ): Activity => ({
+    id: `${sessionId}:settle:${seq}`,
+    kind: "task",
+    actor: { kind: "subagent", name: claimDelegateTask(sessionId) },
+    outcome: settlement.outcome,
+    sessionId,
+    time,
+    summary: settlement.subject,
+    // Bounded: a child's closing message is arbitrary model output and can run
+    // to tens of kilobytes, and this list lives in the device's storage.
+    detail: settlement.report.slice(0, 2000),
+  });
+
+  const approvalActivity = (sessionId: string, tool: string, outcome: Outcome, time: string, id: string): Activity => ({
+    id: `approval:${id}`,
+    kind: "approval",
+    actor: { kind: "system", name: "" },
+    outcome,
+    sessionId,
+    time,
+    summary: tool,
+    detail: outcome === "waiting" ? "Waiting for your decision." : "Nobody answered, so the tool was refused.",
+  });
+
   let noticeTimer = 0;
 
   const setNotice = (text: string | null): void => {
@@ -242,9 +410,23 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     }
   };
 
+  /**
+   * Marks everything recorded so far as read.
+   *
+   * The marker is the newest activity's own timestamp rather than "now": a
+   * device whose clock runs behind the gateway's would otherwise leave new rows
+   * permanently unread, and one running ahead would swallow the next arrival.
+   */
+  const markActivitiesRead = (): void => {
+    const activities = store.state.activities;
+    const newest = activities[activities.length - 1];
+    if (newest === undefined || store.state.activityUnread === 0) return;
+    saveReadAt(localStore(), newest.time);
+    store.set((state) => ({ ...state, activityReadAt: newest.time, activityUnread: 0 }));
+  };
+
   /** The one place a 401 is interpreted. Returns a message for other failures. */
-  const fail = (error: unknown, fallback: string): string => {
-    if (isAbortError(error)) return "";
+  const fail = (error: unknown, fallback: string): string => {    if (isAbortError(error)) return "";
     if (error instanceof ApiError && error.isUnauthenticated) {
       requirePairing();
       return "This device is no longer paired.";
@@ -884,6 +1066,14 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
       case "session.message": {
         const sessionId = event.sessionId;
         if (sessionId === null) return;
+        // A settlement is the only place a child agent's finish is reported, and
+        // it is reported as a user-role message with no envelope. It is recorded
+        // here as its own activity — named with the task from the delegation
+        // that started it — before the feed decides how to draw the row.
+        const settlement = event.data.role === "user" ? parseSettlement(event.data.text) : null;
+        if (settlement !== null) {
+          record(subagentActivity(sessionId, settlement, event.time, event.seq));
+        }
         store.set((state) => {
           const active = state.active;
           if (active === null || active.sessionId !== sessionId) return state;
@@ -895,13 +1085,29 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
       case "session.tool": {
         const sessionId = event.sessionId;
         if (sessionId === null) return;
+        const data = event.data;
+        // The ledger the turn's activity summary is built from. It is fed for
+        // every session, not only the open one, because the reader who needs the
+        // summary is the one who was not looking.
+        if (data.phase === "end") {
+          const calls = turnDigests.get(sessionId) ?? [];
+          calls.push({ tool: data.tool, failed: callFailed(data.isError, data.exitCode) });
+          turnDigests.set(sessionId, calls);
+        }
+        if (data.phase === "start" && DELEGATION_TOOLS.includes(bareToolName(data.tool))) {
+          const known = delegates.get(sessionId) ?? [];
+          // Bounded: a session that delegated a hundred times must not grow this
+          // list forever, and an old name is only ever used as a fallback.
+          known.push({ callId: data.callId, task: delegateTask(data.input), used: false });
+          delegates.set(sessionId, known.slice(-20));
+        }
         store.set((state) => {
           const active = state.active;
           if (active === null || active.sessionId !== sessionId) return state;
           const feed =
-            event.data.phase === "start"
-              ? applyToolStart(active.feed, event.data, event.time, event.seq)
-              : applyToolEnd(active.feed, event.data, event.time, event.seq);
+            data.phase === "start"
+              ? applyToolStart(active.feed, data, event.time, event.seq)
+              : applyToolEnd(active.feed, data, event.time, event.seq);
           return { ...state, active: { ...active, feed } };
         });
         return;
@@ -921,6 +1127,9 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
 
       case "approval.requested": {
         const approval = event.data;
+        if (approval.sessionId !== "") {
+          record(approvalActivity(approval.sessionId, approval.tool, "waiting", event.time, approval.id));
+        }
         store.set((state) => {
           const known = state.approvals.some((item) => item.id === approval.id);
           return { ...state, approvals: known ? state.approvals : [...state.approvals, approval], approvalError: null };
@@ -930,12 +1139,15 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
 
       case "approval.resolved": {
         const decision = event.data;
+        // A decision nobody made is the case the product used to lose: the
+        // operator who missed the notification came back to a session that had
+        // carried on without the tool and no record of why.
+        const refused = decision.decidedBy === "timeout" || decision.decidedBy === "shutdown";
+        if (refused && decision.sessionId !== "") {
+          record(approvalActivity(decision.sessionId, decision.tool, "expired", event.time, decision.id));
+        }
         store.set((state) => {
           const approvals = state.approvals.filter((item) => item.id !== decision.id);
-          // A decision nobody made is the case the product used to lose: the
-          // operator who missed the notification came back to a session that had
-          // carried on without the tool and no record of why.
-          const refused = decision.decidedBy === "timeout" || decision.decidedBy === "shutdown";
           const active = state.active;
           if (!refused || active === null || (decision.sessionId !== "" && active.sessionId !== decision.sessionId)) {
             return { ...state, approvals };
@@ -966,6 +1178,11 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         // a separate `running` frame for whatever it promotes next.
         const sessionId = event.sessionId;
         const turn = event.data;
+        // A settled turn is recorded whether or not its session is the one on
+        // screen: the reader who needs the record is the one who was elsewhere.
+        if (sessionId !== null && turn.state !== "queued" && turn.state !== "running") {
+          record(turnActivity(sessionId, turn, event.time));
+        }
         store.set((state) => {
           const active = state.active;
           if (active === null || (sessionId !== null && active.sessionId !== sessionId)) return state;
@@ -1001,9 +1218,24 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         return;
       }
 
-      case "harness.state":
+      case "harness.state": {
+        // A stopped agent is worth a row of its own: nothing else reports it, and
+        // it is invisible until someone opens the app and finds it dead.
+        if (event.data.state === "failed") {
+          record({
+            id: `harness:${event.time}`,
+            kind: "harness",
+            actor: { kind: "system", name: "" },
+            outcome: "failed",
+            sessionId: "",
+            time: event.time,
+            summary: "",
+            detail: event.data.detail ?? "The agent is not running and could not be restarted.",
+          });
+        }
         store.set((state) => ({ ...state, harness: event.data }));
         return;
+      }
     }
   };
 
@@ -1097,6 +1329,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
       events.wake();
     },
     setNotice,
+    markActivitiesRead,
     handleEvent,
     handleStale,
   };
@@ -1111,6 +1344,8 @@ export function hashFor(route: Route): string {
       return "#/sessions";
     case "settings":
       return "#/settings";
+    case "activity":
+      return "#/activity";
     case "conversation":
       return `#/sessions/${encodeURIComponent(route.sessionId)}`;
     case "boot":
@@ -1136,6 +1371,7 @@ export function routeFromHash(hash: string): Route {
     return code === "" ? { kind: "pair" } : { kind: "pair", code };
   }
   if (head === "settings") return { kind: "settings" };
+  if (head === "activity") return { kind: "activity" };
   if (head === "sessions") {
     if (second === undefined || second === "") return { kind: "sessions" };
     let sessionId = second;

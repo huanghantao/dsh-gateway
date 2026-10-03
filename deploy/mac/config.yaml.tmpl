@@ -240,7 +240,20 @@ push:
   # notification store, and sent verbatim to any webhook above. Turning this on
   # puts the session's title there — or, for a session that has no title, the
   # first line of the prompt that opened it, which is text you typed.
+  #
+  # A notification already says which *agent* settled and what the work amounted
+  # to; this is only about naming the conversation.
   includeSessionName: false
+
+  # Whether a notification may name a delegated task, by the one-line
+  # description the model wrote for it.
+  #
+  # On by default, and a different decision from the line above: that description
+  # is generated to summarise work you asked for rather than being your own
+  # words, and without it three subagents finishing in one session produce three
+  # identical "Subagent finished" notifications. Turn it off if you would rather
+  # not have generated text on a lock screen.
+  includeTaskNames: true
 
 # What the "tidy up" suggestion screen treats as a test run rather than work.
 #

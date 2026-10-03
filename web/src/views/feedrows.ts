@@ -13,6 +13,7 @@
  * or — as this one used to — leave the card saying "running" forever.
  */
 
+import { actorLabel, outcomeLabel } from "../activity.js";
 import { el } from "../dom.js";
 import type { FeedRow } from "../feed.js";
 import { formatTokens, relativeTime } from "../format.js";
@@ -138,13 +139,34 @@ function mountMessage(row: Extract<FeedRow, { kind: "message" }>): RowHandle<Fee
 
 function mountNotice(row: Extract<FeedRow, { kind: "notice" }>): RowHandle<FeedRow> {
   const { item } = row;
-  const node = el(
-    "p",
-    { class: "notice" },
-    item.time === null ? null : el("time", { class: "notice-time", attrs: { datetime: item.time }, text: relativeTime(item.time) }),
-    item.text,
+  const time =
+    item.time === null
+      ? null
+      : el("time", { class: "notice-time", attrs: { datetime: item.time }, text: relativeTime(item.time) });
+
+  // The app's own annotations — "the turn was stopped", "queued" — stay quiet
+  // lines. An agent's report does not: it is drawn as the agent that sent it,
+  // because the reader's two questions about a report are "which agent is this?"
+  // and "did it finish?".
+  if (item.actor === null || item.actor.kind === "system") {
+    return { node: el("p", { class: "notice" }, time, item.text) };
+  }
+
+  const head = el(
+    "header",
+    { class: "notice-head" },
+    el("span", { class: `notice-actor is-${item.actor.kind}`, text: actorLabel(item.actor) }),
+    item.outcome === null ? null : el("span", { class: `notice-outcome is-${item.outcome}`, text: outcomeLabel(item.outcome) }),
+    time,
   );
-  return { node };
+  // The subject is the harness's own line, kept as the evidence for which child
+  // this is: `list_agents` names children by the same id.
+  const subject = item.summary === "" ? null : el("p", { class: "notice-subject", text: item.summary });
+  // A report can be long, and this row is a summary of it; the activity screen
+  // keeps the whole thing.
+  const preview = item.detail.length > 240 ? `${item.detail.slice(0, 239)}…` : item.detail;
+  const body = preview === "" ? null : el("div", { class: "notice-report" }, renderMarkdown(preview));
+  return { node: el("article", { class: "notice notice-report-row" }, head, subject, body) };
 }
 
 /* --------------------------------------------------------------- tool runs */

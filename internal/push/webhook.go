@@ -135,34 +135,52 @@ func (w *Webhook) payload(message Message) ([]byte, error) {
 // A card rather than plain text because of the button: the point of the
 // notification is to get the operator to the session, and a card can carry the
 // link as a control instead of a URL they have to select out of a paragraph.
+//
+// The card is also where the structured half of a message earns its keep: a chat
+// channel shows every notification, including the short turns Web Push stays
+// silent about, so a card that listed them without saying which agent had
+// settled and what it had done would be a wall of identical lines.
 func (w *Webhook) feishuPayload(message Message) ([]byte, error) {
 	colour := "blue"
-	if message.Tag != "" && strings.HasPrefix(message.Tag, "approval-") {
+	switch {
+	case message.Outcome == "failed" || message.Outcome == "expired":
+		// The two outcomes that cost something: an approval expires and is
+		// refused, a failure leaves no result behind.
+		colour = "red"
+	case message.Outcome == "waiting" || strings.HasPrefix(message.Tag, "approval-"):
 		// An approval expires; the card says so in the only way a chat client
 		// lets us: colour.
 		colour = "orange"
 	}
 
-	body := message.Body
-	if body == "" {
-		body = message.Title
-	}
 	card := map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
 		"header": map[string]any{
 			"title":    map[string]any{"tag": "plain_text", "content": message.Title},
 			"template": colour,
 		},
-		"elements": []any{
-			map[string]any{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": body}},
-		},
 	}
+
+	elements := make([]any, 0, 3)
+	if detail := w.detailLine(message); detail != "" {
+		elements = append(elements, map[string]any{
+			"tag":  "div",
+			"text": map[string]any{"tag": "lark_md", "content": detail},
+		})
+	}
+	body := message.Body
+	if body == "" {
+		body = message.Title
+	}
+	elements = append(elements, map[string]any{
+		"tag":  "div",
+		"text": map[string]any{"tag": "lark_md", "content": body},
+	})
 
 	if link := w.absolute(message.URL); link != "" {
 		// Comma-ok rather than a bare assertion: errcheck is right that an
 		// assertion can panic, and the checked form costs nothing here.
-		elements, _ := card["elements"].([]any)
-		card["elements"] = append(elements, map[string]any{
+		elements = append(elements, map[string]any{
 			"tag": "action",
 			"actions": []any{map[string]any{
 				"tag":  "button",
@@ -172,8 +190,24 @@ func (w *Webhook) feishuPayload(message Message) ([]byte, error) {
 			}},
 		})
 	}
+	card["elements"] = elements
 
 	return json.Marshal(map[string]any{"msg_type": "interactive", "card": card})
+}
+
+// detailLine is the line above the body: who settled, and what it amounted to.
+//
+// Empty when a message carries neither, so a hand-built notification — the test
+// button, for one — renders exactly as it did before this existed.
+func (w *Webhook) detailLine(message Message) string {
+	parts := make([]string, 0, 2)
+	if message.Actor != nil {
+		parts = append(parts, "**"+message.Actor.Label()+"**")
+	}
+	if summary := strings.TrimSpace(message.Summary); summary != "" {
+		parts = append(parts, summary)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // absolute turns a notification's app-relative link into one a chat client can

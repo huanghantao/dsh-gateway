@@ -34,6 +34,10 @@ const DefaultTurnThreshold = 2 * time.Minute
 //     notification would otherwise never learn the tool was refused;
 //   - a turn that has finished, once it has run long enough that nobody is
 //     watching it any more;
+//   - a delegated task that has finished, for the same reason — the operator who
+//     handed work to a child agent and walked away is not watching the parent
+//     turn either, and a report that arrives only when the parent settles can be
+//     many minutes after the answer existed;
 //   - a turn that failed, at any length: a failure leaves no result to come back
 //     to, so it is the one outcome where staying silent costs the operator the
 //     whole point of the turn;
@@ -43,6 +47,10 @@ const DefaultTurnThreshold = 2 * time.Minute
 // resync, a model catalog change — is silent by construction. The default case
 // is silence rather than an empty branch, because the safe direction for an
 // event type added later is not to wake anyone.
+//
+// What each notification *says* is the other half of the design, and it lives in
+// activity.go: an actor, an outcome and a summary, because "the agent finished"
+// is not enough to act on when the session was running three agents.
 type Notifier struct {
 	bus     *events.Bus
 	service *Service
@@ -56,12 +64,24 @@ type Notifier struct {
 	// includeName decides whether a notification body may name the session. Off
 	// by default; see NotifierOptions.IncludeSessionName.
 	includeName bool
-	// describe names a session for the notification body. Optional: without it
-	// the message still says which session, by id.
+	// includeTask decides whether a delegated task may be named by what it was
+	// asked to do. See NotifierOptions.IncludeTaskNames.
+	includeTask bool
+	// describe names a session. Optional: without it the message still says
+	// which actor settled and what it did, and says which session by id.
 	describe func(ctx context.Context, sessionID string) string
 
-	mu      sync.Mutex
-	running map[string]time.Time
+	mu sync.Mutex
+	// runs is the per-session ledger: what the current turn has accumulated,
+	// and whether it is still going.
+	runs map[string]*sessionRun
+	// calls are the tool calls still in flight, held across the turn they belong
+	// to so a delegation that outlives the registry's own correlation window can
+	// still be named. See rememberCall.
+	calls map[string]*openCall
+	// order bounds calls by arrival, so a long-lived gateway cannot accumulate
+	// them without limit.
+	order []string
 
 	// ready is closed once the notifier is subscribed. A caller may wait on it
 	// to know that an approval arriving this instant will not be missed, which
@@ -69,6 +89,30 @@ type Notifier struct {
 	ready     chan struct{}
 	readyOnce sync.Once
 }
+
+// sessionRun is one session's current turn, as the notifier sees it.
+type sessionRun struct {
+	started time.Time
+	// live is false once the turn has settled. It stays in the map so a tool
+	// frame that arrives after the turn ended — the two producers do not
+	// interleave perfectly — is not mistaken for a new turn's work.
+	live   bool
+	digest Digest
+}
+
+// openCall is a tool call that has started and not settled.
+type openCall struct {
+	sessionID string
+	tool      string
+	started   time.Time
+	// task is the delegation's own name, empty for anything that is not one.
+	task string
+}
+
+// maxTrackedCalls bounds the in-flight call registry. A session running more
+// tools than this at once is not a case worth growing memory for; the oldest are
+// dropped and their notifications simply name the tool instead of the task.
+const maxTrackedCalls = 256
 
 // NotifierOptions configures a Notifier.
 type NotifierOptions struct {
@@ -86,9 +130,18 @@ type NotifierOptions struct {
 	// False by default and worth leaving false unless it is wanted: the body is
 	// displayed on a lock screen, retained by the operating system's notification
 	// store, and sent verbatim to any chat webhook that is configured. Everything
-	// the notification needs in order to work — that an approval is waiting, that
-	// a turn finished — is said without it.
+	// the notification needs in order to work — which actor settled and what it
+	// did — is said without it.
 	IncludeSessionName bool
+	// IncludeTaskNames allows a notification to name a delegated task by its own
+	// description.
+	//
+	// True by default, and a different decision from IncludeSessionName: a task
+	// description is written by the model to summarise work it was handed, not
+	// text the operator typed. Without it, three delegations finishing in one
+	// session produce three identical "Subagent finished" notifications, which is
+	// the confusion this whole vocabulary exists to remove.
+	IncludeTaskNames bool
 }
 
 // NewNotifier builds a Notifier.
@@ -114,7 +167,9 @@ func NewNotifier(opts NotifierOptions) (*Notifier, error) {
 		now:         opts.Now,
 		describe:    opts.Describe,
 		includeName: opts.IncludeSessionName,
-		running:     map[string]time.Time{},
+		includeTask: opts.IncludeTaskNames,
+		runs:        map[string]*sessionRun{},
+		calls:       map[string]*openCall{},
 		ready:       make(chan struct{}),
 	}, nil
 }
@@ -145,6 +200,24 @@ func (n *Notifier) Run(ctx context.Context) {
 func (n *Notifier) Ready() <-chan struct{} { return n.ready }
 
 // handle decides what one event means.
+func (n *Notifier) handle(ctx context.Context, event events.Event) {
+	switch event.Type {
+	case events.TypeTurnState:
+		n.handleTurn(ctx, event)
+	case events.TypeSessionTool:
+		n.handleTool(ctx, event)
+	case events.TypeApprovalRequested:
+		n.handleApproval(ctx, event)
+	case events.TypeApprovalResolved:
+		n.handleApprovalResolved(ctx, event)
+	case events.TypeHarnessState:
+		n.handleHarness(ctx, event)
+	default:
+		// Nine frame types reach the bus and the rest are silent on purpose. See
+		// the policy in the type comment above.
+	}
+}
+
 // turnStart decides when a turn began, for the purpose of "was it long enough
 // to interrupt someone about".
 //
@@ -168,22 +241,6 @@ func turnStart(state events.TurnState, now func() time.Time) time.Time {
 	return now()
 }
 
-func (n *Notifier) handle(ctx context.Context, event events.Event) {
-	switch event.Type {
-	case events.TypeTurnState:
-		n.handleTurn(ctx, event)
-	case events.TypeApprovalRequested:
-		n.handleApproval(ctx, event)
-	case events.TypeApprovalResolved:
-		n.handleApprovalResolved(ctx, event)
-	case events.TypeHarnessState:
-		n.handleHarness(ctx, event)
-	default:
-		// Nine frame types reach the bus and the rest are silent on purpose. See
-		// the policy in the type comment above.
-	}
-}
-
 func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 	// The payload is typed, so a producer and this consumer cannot disagree
 	// about its shape without the build failing. That is not a hypothetical: the
@@ -201,15 +258,28 @@ func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 			return
 		}
 		n.mu.Lock()
-		if _, known := n.running[event.SessionID]; !known {
-			n.running[event.SessionID] = turnStart(state, n.now)
+		run, known := n.runs[event.SessionID]
+		switch {
+		case !known || !run.live:
+			// A new turn, or the first frame of a turn this process attached
+			// mid-flight. Either way the ledger starts empty: work counted under
+			// a previous turn must not be reported as this one's.
+			n.runs[event.SessionID] = &sessionRun{started: turnStart(state, n.now), live: true}
+		case run.started.IsZero():
+			run.started = turnStart(state, n.now)
 		}
 		n.mu.Unlock()
 
 	case "completed", "cancelled", "failed":
 		n.mu.Lock()
-		started, known := n.running[event.SessionID]
-		delete(n.running, event.SessionID)
+		run, known := n.runs[event.SessionID]
+		var started time.Time
+		var digest Digest
+		if known {
+			started = run.started
+			digest = run.digest
+			run.live = false
+		}
 		n.mu.Unlock()
 		if !known {
 			return
@@ -219,33 +289,194 @@ func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 		// is still looking at — but a failure is the one outcome that leaves
 		// nothing behind to come back to, and a prompt sent from a phone is
 		// exactly the kind that is sent before walking away.
-		if state.State != "failed" && n.now().Sub(started) < n.threshold {
-			return
-		}
-		n.notify(ctx, Message{
-			Title:     turnTitle(state.State),
-			Body:      n.turnBody(ctx, event.SessionID, state),
-			URL:       conversationURL(event.SessionID),
-			Tag:       "turn-" + event.SessionID,
-			SessionID: event.SessionID,
-		}, turnUrgency(state.State))
+		interrupt := state.State == "failed" || n.now().Sub(started) >= n.threshold
+		n.notify(ctx, n.turnMessage(ctx, event.SessionID, state, digest), turnUrgency(state.State), interrupt)
 	}
 }
 
-// turnTitle names the outcome.
+// turnMessage states one settled turn: who, what outcome, and what it amounted
+// to.
 //
-// A failed turn used to arrive titled "The agent finished", which is true in the
-// narrowest sense and useless on a lock screen: the one thing the operator needs
-// to know is the one thing the title did not say.
-func turnTitle(state string) string {
-	switch state {
-	case "failed":
-		return "The turn failed"
-	case "cancelled":
-		return "The turn was stopped"
-	default:
-		return "The agent finished"
+// The summary is the ledger this notifier kept from tool frames. It is the same
+// count the phone can make for a turn it watched, and for a turn it did not —
+// the app was closed, the phone was in a pocket — this is the only place the
+// number exists at all.
+func (n *Notifier) turnMessage(ctx context.Context, sessionID string, state events.TurnState, digest Digest) Message {
+	actor := Actor{Kind: ActorMain}
+	summary := digest.Summary()
+	title := activityTitle(state.State, actor, n.name(ctx, sessionID))
+	body := activityBody(actor, summary, n.settledDetail(state))
+	if body == "" {
+		// A turn that counted nothing — a question answered in prose — still has
+		// to say something, and the operator's own session name says more than
+		// "open the session" whenever the deployment allows it.
+		body = n.label(ctx, sessionID)
 	}
+	if body == "" {
+		body = "Open the session for the result."
+		if state.State == "failed" {
+			body = "Open the session for the error."
+		}
+	}
+	return Message{
+		Title:     title,
+		Body:      body,
+		URL:       conversationURL(sessionID),
+		Tag:       "turn-" + sessionID,
+		SessionID: sessionID,
+		Actor:     &actor,
+		Summary:   summary,
+		Outcome:   outcomeWord(state.State),
+	}
+}
+
+// settledDetail is the explanation a settled turn carries, when it has one.
+//
+// A cancelled turn's detail is suppressed on purpose: the scheduler fills it
+// with the error a cancel surfaced as, and printing that would tell the operator
+// their agent broke when they were the one who stopped it.
+func (n *Notifier) settledDetail(state events.TurnState) string {
+	if state.State == "cancelled" {
+		return ""
+	}
+	return strings.TrimSpace(state.Detail)
+}
+
+// handleTool folds a tool call into the turn's ledger, and reports a delegated
+// task when it settles.
+//
+// Delegations are the reason this branch exists. A `subagent` call is a whole
+// second agent running to completion inside the turn, and until it was read here
+// its finish was invisible: a phone learned that the parent turn had ended, and
+// nothing at all about the child that had answered ten minutes earlier.
+func (n *Notifier) handleTool(ctx context.Context, event events.Event) {
+	data, ok := event.Data.(events.ToolData)
+	if !ok {
+		n.mismatch(event, "events.ToolData")
+		return
+	}
+	sessionID := event.SessionID
+	tool := normaliseTool(data.Tool)
+
+	if data.Phase == events.ToolStarted {
+		n.rememberCall(data.CallID, &openCall{
+			sessionID: sessionID,
+			tool:      tool,
+			started:   n.now(),
+			task:      n.taskName(data.Tool, data.Input),
+		})
+		return
+	}
+
+	call, had := n.forgetCall(data.CallID)
+	// What the call *is* comes from the opening frame, because the closing one
+	// carries neither a title nor the arguments: DSH's completion update repeats
+	// them for nobody. The name is therefore resolved here, once, rather than in
+	// each consumer — the digest and the delegation branch below have to agree
+	// about what ran, and the version of this that normalised the name twice
+	// classified a settled `subagent` call as an unknown tool named "".
+	name := data.Tool
+	if name == "" && had {
+		name = call.tool
+	}
+	fact := settledFact(name, data)
+
+	n.mu.Lock()
+	run, known := n.runs[sessionID]
+	if known && run.live {
+		run.digest = run.digest.add(fact)
+	}
+	n.mu.Unlock()
+
+	if !fact.delegation {
+		return
+	}
+	actor := Actor{Kind: ActorSub}
+	if had {
+		actor.Name = call.task
+	}
+	if actor.Name == "" {
+		actor.Name = n.taskName(data.Tool, data.Input)
+	}
+	started := time.Time{}
+	if had {
+		started = call.started
+	}
+	state := "completed"
+	if fact.failed {
+		state = "failed"
+	}
+	interrupt := state == "failed" || (!started.IsZero() && n.now().Sub(started) >= n.threshold)
+	detail := ""
+	if state == "failed" {
+		detail = strings.TrimSpace(data.Output)
+	}
+	message := Message{
+		Title:     activityTitle(state, actor, n.name(ctx, sessionID)),
+		Body:      activityBody(actor, "", detail),
+		URL:       conversationURL(sessionID),
+		Tag:       "task-" + data.CallID,
+		SessionID: sessionID,
+		Actor:     &actor,
+		Outcome:   outcomeWord(state),
+	}
+	if message.Body == "" {
+		message.Body = "Open the session for the report."
+		if state == "failed" {
+			message.Body = "Open the session for the error."
+		}
+	}
+	n.notify(ctx, message, turnUrgency(state), interrupt)
+}
+
+// taskName is the delegation's own name, gated by the deployment's privacy
+// choice. It returns "" both when the task is unnamed and when naming it is not
+// wanted, because the notification treats those the same way: it falls back to
+// the actor alone.
+func (n *Notifier) taskName(tool, input string) string {
+	if !n.includeTask || !delegationTool(normaliseTool(tool)) {
+		return ""
+	}
+	return taskLabel(input)
+}
+
+// rememberCall records a call that has started.
+func (n *Notifier) rememberCall(callID string, call *openCall) {
+	if callID == "" {
+		return
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, exists := n.calls[callID]; !exists {
+		n.order = append(n.order, callID)
+	}
+	n.calls[callID] = call
+	for len(n.order) > maxTrackedCalls {
+		oldest := n.order[0]
+		n.order = n.order[1:]
+		delete(n.calls, oldest)
+	}
+}
+
+// forgetCall removes a settled call and returns what was known about it.
+func (n *Notifier) forgetCall(callID string) (*openCall, bool) {
+	if callID == "" {
+		return nil, false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	call, ok := n.calls[callID]
+	if !ok {
+		return nil, false
+	}
+	delete(n.calls, callID)
+	for index, id := range n.order {
+		if id == callID {
+			n.order = append(n.order[:index], n.order[index+1:]...)
+			break
+		}
+	}
+	return call, true
 }
 
 // turnUrgency asks for attention in proportion to what went wrong.
@@ -256,44 +487,36 @@ func turnUrgency(state string) string {
 	return "normal"
 }
 
-// turnBody describes the settled turn without naming the session unless asked.
-func (n *Notifier) turnBody(ctx context.Context, sessionID string, state events.TurnState) string {
-	if detail := strings.TrimSpace(state.Detail); detail != "" {
-		return truncate(detail)
-	}
-	if label := n.label(ctx, sessionID); label != "" {
-		return label
-	}
-	if state.State == "failed" {
-		return "Open the session for the error."
-	}
-	return "Open the session for the result."
-}
-
 func (n *Notifier) handleApproval(ctx context.Context, event events.Event) {
 	view, ok := event.Data.(approvals.View)
 	if !ok {
 		n.mismatch(event, "approvals.View")
 		return
 	}
-	body := "The agent is waiting for your decision."
+	actor := Actor{Kind: ActorMain}
+	title := "Approval needed"
 	if view.Tool != "" {
-		body = fmt.Sprintf("Approve %s?", view.Tool)
+		title = fmt.Sprintf("Approval needed · %s", view.Tool)
 	}
+	body := "The agent is waiting for your decision."
 	// The tool name is the harness's own vocabulary and says what is being asked;
-	// the session title is the operator's and is only added on request.
+	// the session title is the operator's and is only added where the deployment
+	// allows it to appear.
 	if label := n.label(ctx, event.SessionID); label != "" {
 		body = fmt.Sprintf("%s · %s", body, label)
 	}
 	n.notify(ctx, Message{
-		Title: "Approval needed",
+		Title: title,
 		Body:  body,
 		URL:   conversationURL(event.SessionID),
 		// One approval replaces the last notification for the same one, and a
 		// second approval in another session does not stack behind it.
 		Tag:       "approval-" + view.ID,
 		SessionID: event.SessionID,
-	}, "high")
+		Actor:     &actor,
+		Outcome:   "waiting",
+		Summary:   strings.TrimSpace(view.Tool),
+	}, "high", true)
 }
 
 // handleApprovalResolved reports a decision nobody made.
@@ -312,6 +535,7 @@ func (n *Notifier) handleApprovalResolved(ctx context.Context, event events.Even
 	if decision.DecidedBy != "timeout" && decision.DecidedBy != "shutdown" {
 		return
 	}
+	actor := Actor{Kind: ActorSystem}
 	body := "Nobody answered, so the tool was refused."
 	if decision.Tool != "" {
 		body = fmt.Sprintf("%s was refused: nobody answered in time.", decision.Tool)
@@ -325,7 +549,10 @@ func (n *Notifier) handleApprovalResolved(ctx context.Context, event events.Even
 		URL:       conversationURL(event.SessionID),
 		Tag:       "approval-" + decision.ID,
 		SessionID: event.SessionID,
-	}, "high")
+		Actor:     &actor,
+		Outcome:   "expired",
+		Summary:   strings.TrimSpace(decision.Tool),
+	}, "high", true)
 }
 
 // handleHarness reports the child process giving up.
@@ -344,6 +571,7 @@ func (n *Notifier) handleHarness(ctx context.Context, event events.Event) {
 	if state.State != "failed" {
 		return
 	}
+	actor := Actor{Kind: ActorSystem}
 	body := "The agent is not running and could not be restarted."
 	if detail := strings.TrimSpace(state.Detail); detail != "" {
 		body = truncate(detail)
@@ -354,8 +582,10 @@ func (n *Notifier) handleHarness(ctx context.Context, event events.Event) {
 		URL:   "./#/sessions",
 		// One standing condition, one notification: a supervisor that retries
 		// must not leave a stack of identical complaints.
-		Tag: "harness",
-	}, "high")
+		Tag:     "harness",
+		Actor:   &actor,
+		Outcome: "failed",
+	}, "high", true)
 }
 
 // mismatch reports a payload this build cannot read.
@@ -394,8 +624,14 @@ func isRuneStart(b byte) bool { return b&0xC0 != 0x80 }
 // notify sends to every channel. Failures are logged, never fatal: a phone that
 // is off must not affect the agent, and one channel being down must not stop the
 // other.
-func (n *Notifier) notify(ctx context.Context, message Message, urgency string) {
-	if n.service != nil {
+//
+// `interrupt` is the deployment's own answer to "is this worth a buzz?". A
+// notification that is not worth one is still delivered to a chat channel when
+// one is configured — a chat message is read at the reader's convenience rather
+// than competing with whatever they are doing — which is what keeps the summary
+// of a short turn from disappearing entirely.
+func (n *Notifier) notify(ctx context.Context, message Message, urgency string, interrupt bool) {
+	if n.service != nil && interrupt {
 		sent, errs := n.service.Broadcast(ctx, message, urgency)
 		if n.logger != nil {
 			if sent == 0 && len(errs) == 0 {
@@ -427,16 +663,30 @@ func (n *Notifier) Channels() []string {
 	return names
 }
 
-// label returns the session's own name, or "" when naming it is not wanted.
+// name returns the session's own name for a notification title.
 //
-// It is the single gate on the operator's words reaching a notification: every
-// caller that would embed a title goes through here, so turning
-// IncludeSessionName off cannot leave one path still leaking it.
-func (n *Notifier) label(ctx context.Context, sessionID string) string {
-	if !n.includeName || n.describe == nil {
+// The title is the one field a lock screen always shows, so naming the session
+// there is what makes two notifications from two sessions distinguishable at a
+// glance. It is the same text IncludeSessionName governs, which is why the
+// option's documentation applies to the body it actually controls; a deployment
+// that wants none of it in either place should leave Describe unset.
+func (n *Notifier) name(ctx context.Context, sessionID string) string {
+	if n.describe == nil {
 		return ""
 	}
-	return strings.TrimSpace(n.describe(ctx, sessionID))
+	return clip(n.describe(ctx, sessionID), 48)
+}
+
+// label returns the session's own name, or "" when naming it is not wanted.
+//
+// It is the gate on the operator's words reaching a notification *body*: every
+// caller that would embed a title there goes through here, so turning
+// IncludeSessionName off cannot leave one path still leaking it.
+func (n *Notifier) label(ctx context.Context, sessionID string) string {
+	if !n.includeName {
+		return ""
+	}
+	return n.name(ctx, sessionID)
 }
 
 // conversationURL is where a tap lands: the app's own route for one session.

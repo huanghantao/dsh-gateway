@@ -57,11 +57,21 @@ no amount of work on this end changes it. The VAPID subject is configurable
 (`push.subject`); set it to a real address you control, because some services
 require a contact and the shipped placeholder is not one.
 
-**What the notification says.** By default, nothing you wrote: a turn that
-finished says so, and a failed turn says so, but neither names the session. That
-default exists because a notification body is the least private place this data
-could go — it is rendered on a lock screen and retained by the operating
-system's notification store.
+**What the notification says.** By default, nothing you wrote. A notification
+carries three facts — which agent settled (the session's own agent, or a delegated
+task), how it went, and what the work amounted to as a count ("12 tool calls · 3
+files changed"). None of that is text you typed: it is either the harness's own
+vocabulary or a count of tool calls.
+
+The one generated addition is a delegated task's own description, which the model
+wrote to summarise work you asked for rather than being your prompt itself;
+`push.includeTaskNames: false` drops it, at the cost of every subagent finishing
+as an identical "Subagent finished".
+
+What is *not* in a notification by default is the session's title. That default
+exists because a notification is the least private place this data could go — it
+is rendered on a lock screen and retained by the operating system's notification
+store.
 
 Setting `push.includeSessionName: true` puts the session's title in the body. For
 a session with no title that falls back to the first line of the prompt that

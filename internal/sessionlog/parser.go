@@ -142,6 +142,8 @@ func (p *parser) feed(line []byte) {
 		p.feedModel(line)
 	case "user/message":
 		p.feedUserMessage(line, env)
+	case "agent/inbox/spliced":
+		p.feedInboxSplice(line, env)
 	case "assistant/message":
 		p.feedAssistantMessage(line, env)
 	case "tool/call":
@@ -157,11 +159,129 @@ func (p *parser) feed(line []byte) {
 		p.meta.TurnCount++
 
 	default:
-		// Everything else — step boundaries, request headers, inbox splices,
-		// sandbox and approval policy records — is internal bookkeeping that a
-		// phone transcript has no use for. Skipping unknown types rather than
+		// Everything else — step boundaries, request headers, sandbox and
+		// approval policy records — is internal bookkeeping that a phone
+		// transcript has no use for. Skipping unknown types rather than
 		// rejecting them is what lets DSH add new event kinds without breaking
 		// history rendering.
+	}
+}
+
+// injectedMessage is one message DSH splices into a session's inbox.
+//
+// The harness delivers more than the operator's prompts this way: a delegated
+// child's final report, a settlement notice, a runtime-context snapshot. The
+// `source` object is what tells them apart, and it is the reason none of this
+// has to be guessed at from the prose.
+type injectedMessage struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+	Source *struct {
+		Kind string `json:"kind"`
+		Form string `json:"form"`
+		// Summary is the harness's own one-line account of the notice.
+		Summary string `json:"summary"`
+		// SenderSessionID names the child a relay or settlement came from.
+		SenderSessionID string `json:"senderSessionId"`
+	} `json:"source"`
+	Role string `json:"role"`
+	ID   string `json:"id"`
+}
+
+// feedInboxSplice reads an `agent/inbox/spliced` event for the one thing in it a
+// reader needs: a delegated task's settlement.
+//
+// This is where the gateway used to lose the answer to "which agent finished,
+// and how did it go?". DSH records a settlement with a typed source —
+// `kind: "subagent-settled"`, `form: "notice"`, its own `summary` sentence and
+// the child's session id — and the projection dropped the whole event as
+// bookkeeping, so a phone watching a desk session was never told a child had
+// finished at all.
+//
+// Everything else a splice carries is skipped on purpose. A relay is the child's
+// report delivered *to the model*, and the same text follows the settlement as
+// its closing message; projecting both would show one child's answer twice,
+// which is a duplication DSH's own issue tracker already records (dsh#6744).
+func (p *parser) feedInboxSplice(line []byte, env envelope) {
+	var ev struct {
+		Data struct {
+			Inserted []injectedMessage `json:"inserted"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(line, &ev); err != nil {
+		p.debug("inbox splice", err)
+		return
+	}
+	for index, message := range ev.Data.Inserted {
+		if message.Source == nil || message.Source.Kind != sourceSubagentSettled {
+			continue
+		}
+		// The blocks are joined the way the harness assembled them, which is why
+		// its sentence and its "Its closing message:" marker run together without
+		// a separating newline.
+		text := joinedContent(message)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		id := message.ID
+		if id == "" {
+			// A splice carries no id of its own in the logs this build has seen.
+			// The sequence number and the position within the splice are stable
+			// across reads, which is what a key has to be.
+			id = fmt.Sprintf("splice-%d-%d", env.Seq, index)
+		}
+		p.append(Item{
+			ID:   id,
+			Seq:  env.Seq,
+			Time: fromMillis(env.Time),
+			Role: RoleNotice,
+			Text: text,
+			// The actor is the *child*, named by the harness, and never the main
+			// agent: a settlement is the one notice in a session that is not
+			// about the session's own agent.
+			Actor:   ActorSubagent,
+			Summary: strings.TrimSpace(message.Source.Summary),
+			Outcome: settlementOutcome(text),
+		})
+	}
+}
+
+// joinedContent concatenates the text blocks of one injected message.
+//
+// The log stores a settlement as several blocks — the sentence, the "Its closing
+// message:" marker, the report — and they are one message to every reader of it,
+// which is how the harness assembled them and how the ACP path delivers them.
+func joinedContent(message injectedMessage) string {
+	var text strings.Builder
+	for _, block := range message.Content {
+		if block.Type == "text" {
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String()
+}
+
+// settlementOutcome reads how a settled child ended, from the harness's own six
+// sentences. It exists because the source object records the fact that a child
+// settled but not how it went; getting that wrong would report a refusal as a
+// success, so an unrecognised wording is reported as an unknown outcome rather
+// than assumed to be completion.
+func settlementOutcome(text string) string {
+	switch {
+	case strings.Contains(text, "finished and will do no further work"),
+		strings.Contains(text, "finished and left no closing message"):
+		return OutcomeCompleted
+	case strings.Contains(text, "was stopped before it finished"):
+		return OutcomeCancelled
+	case strings.Contains(text, "declined the task"),
+		strings.Contains(text, "failed before it finished"),
+		strings.Contains(text, "ran out of room before it finished"),
+		strings.Contains(text, "ended abnormally"):
+		return OutcomeFailed
+	default:
+		return ""
 	}
 }
 

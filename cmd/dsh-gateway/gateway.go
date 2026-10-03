@@ -494,8 +494,14 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 			// and mirrored to any configured webhook, and this one would be text
 			// the operator typed. `Preview` in particular is the opening line of
 			// their first prompt, so it is the most sensitive thing that could
-			// have been put here.
+			// have been put here. What still names the session is the *title*,
+			// which is what makes two notifications distinguishable at a glance.
 			IncludeSessionName: cfg.Push.IncludeSessionName,
+			// On unless turned off, and a different decision: a delegated task's
+			// description is generated text summarising work the operator asked
+			// for, and without it three subagents finishing in one session are
+			// three identical notifications.
+			IncludeTaskNames: cfg.Push.IncludeTaskNames,
 			Describe: func(ctx context.Context, sessionID string) string {
 				if history == nil {
 					return ""
@@ -576,6 +582,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 	if follower != nil {
 		deps.Follower = follower
 	}
+	// The harness is the authority on what it still holds, and those are exactly
+	// the sessions its own listing cannot show. A client always knows.
+	deps.Held = harnessDriver
 
 	api, err := v1.New(deps)
 	if err != nil {
