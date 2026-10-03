@@ -1,7 +1,6 @@
 package push
 
 import (
-	"encoding/json"
 	"strings"
 	"unicode/utf8"
 
@@ -16,11 +15,18 @@ import (
 // two questions a lock screen has to answer are "which of my agents is this?"
 // and "what actually happened?". Neither is answerable from the outcome alone.
 //
-// So a notification is now stated as three facts, in the order they matter:
+// So a notification is stated as three facts, in the order they matter:
 //
-//	actor    the main agent, or a named delegation ("Subagent · Research deps")
+//	actor    the main agent, or the gateway itself
 //	outcome  completed / failed / cancelled
 //	summary  what the work amounted to ("12 tool calls · 3 files changed")
+//
+// A delegated child agent is deliberately absent from that vocabulary. It has an
+// actor of its own in the app — a settlement is a row in the conversation, and a
+// reader scrolling history has to know which agent it belongs to — but it is not
+// something a notification is ever about: a child settles inside its parent's
+// turn, and the parent is what the reader is waiting for. The delegation still
+// shows up here, counted in the summary of the turn that made it.
 //
 // This file builds those three. It is deliberately free of I/O and of the
 // notifier's policy: the strings are a pure function of the frames the gateway
@@ -28,17 +34,15 @@ import (
 
 // ActorKind is who a notification is about.
 //
-// The distinction exists because the harness runs more than one agent inside a
-// session: the main agent owns the turn, and a `subagent` tool call runs a second
-// one to completion before answering. Both settle, and until this vocabulary
-// existed both settled as the same anonymous "the agent".
+// The distinction exists because not everything that settles is an agent: the
+// gateway itself reports an approval nobody answered and a harness that gave up,
+// and a reader who cannot tell those from the agent's own work reads them as
+// something the agent did.
 type ActorKind string
 
 const (
 	// ActorMain is the session's own agent: the one a prompt is sent to.
 	ActorMain ActorKind = "main"
-	// ActorSub is a delegated child agent, named for the task it was given.
-	ActorSub ActorKind = "subagent"
 	// ActorSystem is the gateway itself — a stopped harness, a refused
 	// approval. Nothing an agent did.
 	ActorSystem ActorKind = "system"
@@ -47,20 +51,11 @@ const (
 // Actor names who a notification is about.
 type Actor struct {
 	Kind ActorKind `json:"kind"`
-	// Name is the task a delegation was given, and is empty for the main agent:
-	// "the main agent" needs no further identification, and inventing one would
-	// put a word the operator never chose on a lock screen.
-	Name string `json:"name,omitempty"`
 }
 
-// Label is the actor as a notification prints it: "Subagent · Research deps".
+// Label is the actor as a notification prints it: "Main agent", "Gateway".
 func (a Actor) Label() string {
 	switch a.Kind {
-	case ActorSub:
-		if a.Name == "" {
-			return "Subagent"
-		}
-		return "Subagent · " + a.Name
 	case ActorSystem:
 		return "Gateway"
 	default:
@@ -89,7 +84,10 @@ type Digest struct {
 	Calls int
 	// Failed is how many of those the harness reported as failed.
 	Failed int
-	// Delegations is how many tool calls were handed to a child agent.
+	// Delegations is how many tool calls were handed to a child agent. It is
+	// counted for the turn's own summary — "3 delegations" says how much of the
+	// work was handed out — and it is the only trace a delegation leaves in a
+	// notification, since the child's own finish is not announced.
 	Delegations int
 	// Edits is how many calls changed a file. Only the tools whose arguments
 	// record a whole-file mutation are counted, so `bash` running `sed -i` is
@@ -152,7 +150,7 @@ func fileTool(tool string) bool {
 // `workflow` is included because it is the same event from the operator's point
 // of view — work handed to agents that are not the main one — even though it may
 // fan out to several children internally. The gateway sees one call, so it
-// reports one delegation; counting the fan-out would mean inventing children
+// counts one delegation; counting the fan-out would mean inventing children
 // whose names and results this process never receives.
 func delegationTool(tool string) bool {
 	switch tool {
@@ -202,41 +200,6 @@ func normaliseTool(tool string) string {
 	return tool
 }
 
-// taskLabel reads the name of a delegated task from a call's arguments.
-//
-// The harness's own vocabulary is used in preference to anything this file could
-// invent: `description` is the one-line summary the model wrote for the task, and
-// `prompt` is the fallback for a delegation that carries only its instructions.
-// A label is bounded to one line and a readable length, because it is headed for
-// a lock screen and a chat card.
-func taskLabel(input string) string {
-	if strings.TrimSpace(input) == "" {
-		return ""
-	}
-	var args struct {
-		Description string `json:"description"`
-		Prompt      string `json:"prompt"`
-	}
-	if err := json.Unmarshal([]byte(input), &args); err != nil {
-		// Unparseable arguments are not a reason to lose the notification; the
-		// delegation is still named, just by its tool.
-		return ""
-	}
-	label := strings.TrimSpace(args.Description)
-	if label == "" {
-		label = firstLine(args.Prompt)
-	}
-	return clip(label, 72)
-}
-
-// firstLine is the part of a prompt a single notification line can carry.
-func firstLine(text string) string {
-	if index := strings.IndexAny(text, "\r\n"); index >= 0 {
-		text = text[:index]
-	}
-	return strings.TrimSpace(text)
-}
-
 // clip shortens a label to a rune budget without cutting a multi-byte character
 // in half, and marks that it did.
 func clip(text string, limit int) string {
@@ -274,17 +237,18 @@ func itoa(value int) string {
 
 // activityTitle states who did what, in the order a notification is read.
 //
-//	Completed · Main agent · Checkout flow
-//	Completed · Subagent · Research deps
-//	Failed · Main agent
+//	completed · Main agent · Checkout flow
+//	failed · Main agent
+//	Approval expired
 //
 // The outcome leads, because it is the one word that decides whether the reader
-// has to do anything; the actor follows, because "which agent" is the question
-// this vocabulary exists to answer; the session name — the operator's own words,
-// and only present when the deployment opted in — closes the line, naming which
-// conversation the work belonged to. The actor is never omitted: a notification
-// that does not say whether the main agent or a child finished is the confusion
-// this model removes.
+// has to do anything; the actor follows, because "the agent or the gateway?" is
+// the question it answers — an approval nobody answered is not something an
+// agent did. The session name — the operator's own words, and only present when
+// the deployment opted in — closes the line, naming which conversation the work
+// belonged to. An actor that was never set is omitted rather than guessed at:
+// the line then keeps its older, actor-free shape instead of claiming to be the
+// main agent.
 func activityTitle(state string, actor Actor, session string) string {
 	parts := make([]string, 0, 3)
 	if outcome := outcomeWord(state); outcome != "" {
@@ -319,14 +283,11 @@ func outcomeWord(state string) string {
 
 // activityBody is the rest of what a notification knows, in one line.
 //
-// The pieces are ordered by how much they add: the delegated task's own name,
-// then what the turn accumulated, then the harness's error. A reader who only
-// sees the first fragment still learns something the title did not say.
-func activityBody(actor Actor, summary, detail string) string {
-	parts := make([]string, 0, 3)
-	if actor.Kind == ActorSub && actor.Name != "" {
-		parts = append(parts, actor.Name)
-	}
+// The pieces are ordered by how much they add: what the work accumulated, then
+// the harness's error. A reader who only sees the first fragment still learns
+// something the title did not say.
+func activityBody(summary, detail string) string {
+	parts := make([]string, 0, 2)
 	if summary != "" {
 		parts = append(parts, summary)
 	}

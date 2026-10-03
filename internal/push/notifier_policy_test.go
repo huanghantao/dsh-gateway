@@ -13,10 +13,10 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/push"
 )
 
-// These tests cover the events added when the notification policy was widened:
-// the three cases where staying silent cost the operator something real. Each
-// one drives the real notifier over a real encrypted push, because "a
-// notification fires" is only true if it arrives.
+// These tests cover the notification policy in both directions: the cases where
+// staying silent costs the operator something real, and the cases that look like
+// they might and do not. Each one drives the real notifier over a real encrypted
+// push, because "a notification fires" is only true if it arrives.
 
 // notifierFor builds a notifier delivering to one browser, started and ready.
 func notifierFor(t *testing.T, opts push.NotifierOptions) (*events.Bus, *receiver) {
@@ -135,6 +135,48 @@ func TestShortSuccessIsStillSilent(t *testing.T) {
 	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: "running"})
 	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: "completed"})
 	waitFor(t, func() bool { return len(rec.received()) == 0 }, "nothing for a quick turn")
+}
+
+// TestAChildSessionsTurnIsNeverAnnounced covers the other half of "only the main
+// agent's work is news".
+//
+// A delegated child is a session of its own: the harness gives it a log, turns
+// and a stop reason, and the log watcher follows it like any other. Nothing about
+// that session is something the operator opened or is waiting on — the turn that
+// spawned it is — so neither a long turn nor a failure of the child's own may
+// interrupt anyone. Both are published here with the mark the watcher sets, and
+// the threshold is an hour so the long one is long only because the payload says
+// so.
+func TestAChildSessionsTurnIsNeverAnnounced(t *testing.T) {
+	bus, rec := notifierFor(t, push.NotifierOptions{Threshold: time.Hour})
+
+	longStart := time.Now().Add(-10 * time.Minute)
+	bus.Publish(events.TypeTurnState, "session-child", events.TurnState{
+		TurnID: "turn-child", State: "running", StartedAt: &longStart, Subagent: true,
+	})
+	bus.Publish(events.TypeTurnState, "session-child", events.TurnState{
+		TurnID: "turn-child", State: "completed", StartedAt: &longStart, Subagent: true,
+	})
+	bus.Publish(events.TypeTurnState, "session-child", events.TurnState{
+		TurnID: "turn-child-2", State: "failed", Detail: "the child ran out of context", Subagent: true,
+	})
+
+	// A main-agent failure is the control: it must still be announced, so this
+	// test cannot pass by silencing everything.
+	bus.Publish(events.TypeTurnState, "session-main", events.TurnState{TurnID: "turn-main", State: "running"})
+	bus.Publish(events.TypeTurnState, "session-main", events.TurnState{
+		TurnID: "turn-main", State: "failed", Detail: "no API key for provider route",
+	})
+
+	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for the failed main turn")
+	message := rec.received()[0]
+	if message.SessionID != "session-main" {
+		t.Fatalf("notification is about %q, want the main session: a child's turn is not news",
+			message.SessionID)
+	}
+	if got := len(rec.received()); got != 1 {
+		t.Errorf("received %d notifications, want 1: the child settled twice and neither was worth one", got)
+	}
 }
 
 // TestHarnessFailureIsReportedButRestartsAreNot covers the line between a

@@ -196,10 +196,14 @@ transcript:
   # events per second, so a second is well inside the noise.
   followInterval: "1s"
 
-# Web Push notifications. Two things earn an interruption: an approval that
-# expires if nobody answers, and a turn that ran long enough that nobody is
-# watching it any more. Subscriptions belong to paired devices, so revoking a
-# device stops its notifications in the same request.
+# Web Push notifications. What earns an interruption: an approval waiting on you,
+# an approval that expires because nobody answered, a turn that ran long enough
+# that nobody is watching it any more, one that failed at any length, and the
+# agent process giving up. A delegated child finishing is deliberately not among
+# them — the turn that spawned it is what gets announced, with its delegations
+# counted — so a session running three subagents does not buzz three times.
+# Subscriptions belong to paired devices, so revoking a device stops its
+# notifications in the same request.
 push:
   enabled: true
   # A contact the push service can reach the operator at.
@@ -244,16 +248,6 @@ push:
   # A notification already says which *agent* settled and what the work amounted
   # to; this is only about naming the conversation.
   includeSessionName: false
-
-  # Whether a notification may name a delegated task, by the one-line
-  # description the model wrote for it.
-  #
-  # On by default, and a different decision from the line above: that description
-  # is generated to summarise work you asked for rather than being your own
-  # words, and without it three subagents finishing in one session produce three
-  # identical "Subagent finished" notifications. Turn it off if you would rather
-  # not have generated text on a lock screen.
-  includeTaskNames: true
 
 # What the "tidy up" suggestion screen treats as a test run rather than work.
 #

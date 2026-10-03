@@ -298,16 +298,6 @@ type Push struct {
 	// mirrored to any chat webhook that is configured. What it would carry is
 	// text the operator typed, so it is opt-in rather than assumed.
 	IncludeSessionName bool `yaml:"includeSessionName"`
-	// IncludeTaskNames lets a notification say which delegated task finished, by
-	// the description the model wrote for it.
-	//
-	// On by default, and a different decision from IncludeSessionName: without
-	// it, three subagents finishing in one session produce three identical
-	// "Subagent finished" notifications, which is the confusion the notification
-	// vocabulary exists to remove. It is still a switch, because a task
-	// description is generated text derived from the operator's prompt and a
-	// deployment may not want it on a lock screen or mirrored to a chat channel.
-	IncludeTaskNames bool `yaml:"includeTaskNames"`
 	// Webhooks are chat channels that receive the same notifications. They exist
 	// because Web Push on Android is Google's push service and nothing else, so a
 	// phone that cannot reach it — no Google Play services, or a network that
@@ -517,10 +507,9 @@ func Default() Config {
 			Upstream: "http://127.0.0.1:3080",
 		},
 		Push: Push{
-			Enabled:          true,
-			Subject:          DefaultPushSubject,
-			TurnThreshold:    Duration(2 * time.Minute),
-			IncludeTaskNames: true,
+			Enabled:       true,
+			Subject:       DefaultPushSubject,
+			TurnThreshold: Duration(2 * time.Minute),
 		},
 		Transcript: Transcript{
 			Enabled:        true,

@@ -317,7 +317,7 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 		// the present, and a phone that is already watching has no other way to
 		// learn that the gateway came up in the middle of someone's turn.
 		if running && !owned {
-			w.publishTurn(sessionID, true, meta.TurnCount)
+			w.publishTurn(sessionID, true, meta)
 		}
 		return
 	}
@@ -326,7 +326,7 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 	// finish without the log changing in the same tick as the lock — a process
 	// opening the session is one case, a process dying mid-turn is another.
 	if running != wasRunning && !owned {
-		w.publishTurn(sessionID, running, meta.TurnCount)
+		w.publishTurn(sessionID, running, meta)
 	}
 
 	if previous.dropped {
@@ -368,15 +368,23 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 }
 
 // publishTurn reports a turn starting or finishing, whoever said so.
-func (w *Watcher) publishTurn(sessionID string, running bool, turnCount int) {
+//
+// The session's own origin rides along, because it is the one thing a follower
+// learns here and nothing downstream can: a delegated child has a log and turns
+// exactly like a session a person opened, and its id appears in no session list
+// the phone holds. A consumer deciding whether a finished turn is worth an
+// interruption needs to know which of the two it is looking at, and this is the
+// only frame that carries the answer.
+func (w *Watcher) publishTurn(sessionID string, running bool, meta sessionlog.Meta) {
 	state := "completed"
 	if running {
 		state = "running"
 	}
 	w.opts.Bus.Publish(events.TypeSessionState, sessionID, events.SessionBusy{Busy: running})
 	w.opts.Bus.Publish(events.TypeTurnState, sessionID, events.TurnState{
-		TurnID: fmt.Sprintf("log-%d", turnCount+1),
-		State:  state,
+		TurnID:   fmt.Sprintf("log-%d", meta.TurnCount+1),
+		State:    state,
+		Subagent: meta.Origin == sessionlog.OriginSubagent,
 	})
 }
 

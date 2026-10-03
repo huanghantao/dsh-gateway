@@ -147,6 +147,57 @@ func TestTurnBoundariesBecomeState(t *testing.T) {
 	}
 }
 
+// TestAChildSessionsTurnIsMarkedAndTheMainAgentsIsNot pins the one fact a
+// follower of logs knows that nothing downstream can look up.
+//
+// A delegated child is written to disk exactly like a session a person opened:
+// same directory layout, same turns, same lock. The only difference is `origin`
+// in the header, and a consumer deciding whether a finished turn deserves an
+// interruption has to be able to tell them apart — otherwise every child that
+// stops working reads as the main agent having finished.
+func TestAChildSessionsTurnIsMarkedAndTheMainAgentsIsNot(t *testing.T) {
+	main := newFixture(t, "session-main")
+	child := main.child(t, "session-child")
+	for _, f := range []*fixture{main, child} {
+		f.flush(map[string]any{"type": "turn/start", "data": map[string]any{"turn": 1}})
+	}
+
+	// One watcher over the root, so both sessions are followed by the same code
+	// and the header is the only difference between the frames it publishes.
+	watcher, _, sub := main.watcher(t, nil)
+	releaseMain := main.holdLock(t)
+	defer releaseMain()
+	releaseChild := child.holdLock(t)
+	defer releaseChild()
+
+	// First sight seeds each session; the running frames published after it are
+	// not what this test is about.
+	watcher.Sweep(context.Background())
+	_ = drain(sub)
+
+	main.flush(map[string]any{"type": "turn/end", "data": map[string]any{"turn": 1, "reason": map[string]any{"kind": "completed"}}})
+	child.flush(map[string]any{"type": "turn/end", "data": map[string]any{"turn": 1, "reason": map[string]any{"kind": "completed"}}})
+	watcher.Sweep(context.Background())
+
+	settled := map[string]events.TurnState{}
+	for _, e := range drain(sub) {
+		state, ok := e.Data.(events.TurnState)
+		if e.Type != events.TypeTurnState || !ok || state.State != "completed" {
+			continue
+		}
+		settled[e.SessionID] = state
+	}
+	if len(settled) != 2 {
+		t.Fatalf("settled turns published = %v, want one for each session", settled)
+	}
+	if !settled["session-child"].Subagent {
+		t.Error("the child's turn is not marked as a child's, so nothing can tell it from the main agent's")
+	}
+	if settled["session-main"].Subagent {
+		t.Error("a session a person opened was marked as a delegated child")
+	}
+}
+
 // TestSessionLockDoesNotOutliveTheProcess pins the reason the lock is consulted
 // at all: a crashed turn leaves `turn/start` behind, and only the lock says the
 // difference.

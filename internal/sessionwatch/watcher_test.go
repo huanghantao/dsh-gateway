@@ -53,6 +53,32 @@ func newFixture(t *testing.T, id string) *fixture {
 	return f
 }
 
+// child writes a delegated child session beside this one, in the same root.
+//
+// It is a session like any other on disk — its own directory, its own turns, its
+// own lock — and the only thing that says what it is is `origin` in the header,
+// which the harness writes when it creates one to answer a `subagent` call.
+func (f *fixture) child(t *testing.T, id string) *fixture {
+	t.Helper()
+	dir := filepath.Join(f.root, "--workspace--", id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	child := &fixture{
+		t:       t,
+		root:    f.root,
+		id:      id,
+		path:    filepath.Join(dir, "session.v4.jsonl.zstd"),
+		encoder: f.encoder,
+	}
+	child.flush(map[string]any{
+		"type": "session", "version": sessionlog.SupportedVersion, "id": id, "cwd": "/tmp/ws",
+		"parentSession": "session-parent", "isSeeded": false,
+		"origin": sessionlog.OriginSubagent, "delegationDepth": 1,
+	})
+	return child
+}
+
 // flush appends one complete zstd frame holding the given events.
 func (f *fixture) flush(events ...map[string]any) {
 	f.t.Helper()

@@ -34,14 +34,17 @@ const DefaultTurnThreshold = 2 * time.Minute
 //     notification would otherwise never learn the tool was refused;
 //   - a turn that has finished, once it has run long enough that nobody is
 //     watching it any more;
-//   - a delegated task that has finished, for the same reason — the operator who
-//     handed work to a child agent and walked away is not watching the parent
-//     turn either, and a report that arrives only when the parent settles can be
-//     many minutes after the answer existed;
 //   - a turn that failed, at any length: a failure leaves no result to come back
 //     to, so it is the one outcome where staying silent costs the operator the
 //     whole point of the turn;
 //   - a harness that gave up, which nothing else will report.
+//
+// A delegated task's own finish is deliberately *not* on that list. A child
+// agent settles inside its parent's turn, and the parent is still working when
+// it does: announcing the child tells the operator that something finished while
+// the thing they are waiting for has not. The turn's own notification is the one
+// that answers "is it done?", and it carries the delegations in its summary, so
+// nothing about the work is lost by waiting for it. See handleTool.
 //
 // Everything else — a message arriving while the reader watches, a session
 // resync, a model catalog change — is silent by construction. The default case
@@ -64,9 +67,6 @@ type Notifier struct {
 	// includeName decides whether a notification body may name the session. Off
 	// by default; see NotifierOptions.IncludeSessionName.
 	includeName bool
-	// includeTask decides whether a delegated task may be named by what it was
-	// asked to do. See NotifierOptions.IncludeTaskNames.
-	includeTask bool
 	// describe names a session. Optional: without it the message still says
 	// which actor settled and what it did, and says which session by id.
 	describe func(ctx context.Context, sessionID string) string
@@ -101,12 +101,14 @@ type sessionRun struct {
 }
 
 // openCall is a tool call that has started and not settled.
+//
+// Only its name is kept, and it is kept because the closing frame may omit it:
+// DSH's completion update republishes neither the title nor the arguments, so
+// the opening frame is the only place a settled call can be identified from. The
+// digest needs that identification to count a delegation or a file change at
+// all.
 type openCall struct {
-	sessionID string
-	tool      string
-	started   time.Time
-	// task is the delegation's own name, empty for anything that is not one.
-	task string
+	tool string
 }
 
 // maxTrackedCalls bounds the in-flight call registry. A session running more
@@ -133,15 +135,6 @@ type NotifierOptions struct {
 	// the notification needs in order to work — which actor settled and what it
 	// did — is said without it.
 	IncludeSessionName bool
-	// IncludeTaskNames allows a notification to name a delegated task by its own
-	// description.
-	//
-	// True by default, and a different decision from IncludeSessionName: a task
-	// description is written by the model to summarise work it was handed, not
-	// text the operator typed. Without it, three delegations finishing in one
-	// session produce three identical "Subagent finished" notifications, which is
-	// the confusion this whole vocabulary exists to remove.
-	IncludeTaskNames bool
 }
 
 // NewNotifier builds a Notifier.
@@ -167,7 +160,6 @@ func NewNotifier(opts NotifierOptions) (*Notifier, error) {
 		now:         opts.Now,
 		describe:    opts.Describe,
 		includeName: opts.IncludeSessionName,
-		includeTask: opts.IncludeTaskNames,
 		runs:        map[string]*sessionRun{},
 		calls:       map[string]*openCall{},
 		ready:       make(chan struct{}),
@@ -205,7 +197,7 @@ func (n *Notifier) handle(ctx context.Context, event events.Event) {
 	case events.TypeTurnState:
 		n.handleTurn(ctx, event)
 	case events.TypeSessionTool:
-		n.handleTool(ctx, event)
+		n.handleTool(event)
 	case events.TypeApprovalRequested:
 		n.handleApproval(ctx, event)
 	case events.TypeApprovalResolved:
@@ -249,6 +241,18 @@ func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 	state, ok := event.Data.(events.TurnState)
 	if !ok {
 		n.mismatch(event, "events.TurnState")
+		return
+	}
+	if state.Subagent {
+		// A delegated child's turn. It settles while the session that asked for
+		// it is still working, and it is not a session the operator opened or
+		// can be waiting on — the parent's own turn is. Announcing it would be
+		// the notification policy's worst case: an interruption that says work
+		// is finished when the work being waited for is not.
+		//
+		// The ledger is left untouched as well, not merely unannounced: it is
+		// keyed by session, so a child's frames could only ever be counted under
+		// the child, and its summary is never read.
 		return
 	}
 
@@ -305,7 +309,7 @@ func (n *Notifier) turnMessage(ctx context.Context, sessionID string, state even
 	actor := Actor{Kind: ActorMain}
 	summary := digest.Summary()
 	title := activityTitle(state.State, actor, n.name(ctx, sessionID))
-	body := activityBody(actor, summary, n.settledDetail(state))
+	body := activityBody(summary, n.settledDetail(state))
 	if body == "" {
 		// A turn that counted nothing — a question answered in prose — still has
 		// to say something, and the operator's own session name says more than
@@ -342,14 +346,16 @@ func (n *Notifier) settledDetail(state events.TurnState) string {
 	return strings.TrimSpace(state.Detail)
 }
 
-// handleTool folds a tool call into the turn's ledger, and reports a delegated
-// task when it settles.
+// handleTool folds a settled tool call into the turn's ledger.
 //
-// Delegations are the reason this branch exists. A `subagent` call is a whole
-// second agent running to completion inside the turn, and until it was read here
-// its finish was invisible: a phone learned that the parent turn had ended, and
-// nothing at all about the child that had answered ten minutes earlier.
-func (n *Notifier) handleTool(ctx context.Context, event events.Event) {
+// That is the whole job now: the ledger is what the turn's own notification
+// summarises, so a `subagent` call is counted as a delegation and reported when
+// the turn that made it ends, rather than announced on its own the moment the
+// child answers. A child's finish is not a finish of the operator's work — the
+// parent keeps going, often for many more minutes — and a lock screen that says
+// "done" over work that is still running is worse than staying quiet. See the
+// policy in the type comment above.
+func (n *Notifier) handleTool(event events.Event) {
 	data, ok := event.Data.(events.ToolData)
 	if !ok {
 		n.mismatch(event, "events.ToolData")
@@ -359,12 +365,7 @@ func (n *Notifier) handleTool(ctx context.Context, event events.Event) {
 	tool := normaliseTool(data.Tool)
 
 	if data.Phase == events.ToolStarted {
-		n.rememberCall(data.CallID, &openCall{
-			sessionID: sessionID,
-			tool:      tool,
-			started:   n.now(),
-			task:      n.taskName(data.Tool, data.Input),
-		})
+		n.rememberCall(data.CallID, &openCall{tool: tool})
 		return
 	}
 
@@ -372,8 +373,7 @@ func (n *Notifier) handleTool(ctx context.Context, event events.Event) {
 	// What the call *is* comes from the opening frame, because the closing one
 	// carries neither a title nor the arguments: DSH's completion update repeats
 	// them for nobody. The name is therefore resolved here, once, rather than in
-	// each consumer — the digest and the delegation branch below have to agree
-	// about what ran, and the version of this that normalised the name twice
+	// each consumer — the version of this that normalised the name twice
 	// classified a settled `subagent` call as an unknown tool named "".
 	name := data.Tool
 	if name == "" && had {
@@ -387,57 +387,6 @@ func (n *Notifier) handleTool(ctx context.Context, event events.Event) {
 		run.digest = run.digest.add(fact)
 	}
 	n.mu.Unlock()
-
-	if !fact.delegation {
-		return
-	}
-	actor := Actor{Kind: ActorSub}
-	if had {
-		actor.Name = call.task
-	}
-	if actor.Name == "" {
-		actor.Name = n.taskName(data.Tool, data.Input)
-	}
-	started := time.Time{}
-	if had {
-		started = call.started
-	}
-	state := "completed"
-	if fact.failed {
-		state = "failed"
-	}
-	interrupt := state == "failed" || (!started.IsZero() && n.now().Sub(started) >= n.threshold)
-	detail := ""
-	if state == "failed" {
-		detail = strings.TrimSpace(data.Output)
-	}
-	message := Message{
-		Title:     activityTitle(state, actor, n.name(ctx, sessionID)),
-		Body:      activityBody(actor, "", detail),
-		URL:       conversationURL(sessionID),
-		Tag:       "task-" + data.CallID,
-		SessionID: sessionID,
-		Actor:     &actor,
-		Outcome:   outcomeWord(state),
-	}
-	if message.Body == "" {
-		message.Body = "Open the session for the report."
-		if state == "failed" {
-			message.Body = "Open the session for the error."
-		}
-	}
-	n.notify(ctx, message, turnUrgency(state), interrupt)
-}
-
-// taskName is the delegation's own name, gated by the deployment's privacy
-// choice. It returns "" both when the task is unnamed and when naming it is not
-// wanted, because the notification treats those the same way: it falls back to
-// the actor alone.
-func (n *Notifier) taskName(tool, input string) string {
-	if !n.includeTask || !delegationTool(normaliseTool(tool)) {
-		return ""
-	}
-	return taskLabel(input)
 }
 
 // rememberCall records a call that has started.

@@ -777,11 +777,15 @@ export type Readiness = "ready" | "starting" | "down";
 /* -------------------------------------------------------- conversation feed */
 
 /**
- * Who a notification or a notice is about.
+ * Who a row in the conversation is about.
  *
- * It mirrors `push.Actor` on the gateway, which is where the vocabulary is
- * defined: one session can run several agents, and a row that does not say which
- * one it belongs to is the ambiguity the field exists to remove.
+ * This is the *app's* vocabulary, and it is deliberately wider than the
+ * notification's (`push.ActorKind` on the gateway, which knows only the session's
+ * own agent and the gateway itself): one session can run several agents, a
+ * delegated child settles as a row of its own in the transcript, and a row that
+ * does not say which agent it belongs to is the ambiguity the field exists to
+ * remove. Nothing about a child is ever a notification — see the notification
+ * policy in `docs/api.md`.
  */
 export type ActorKind = "main" | "subagent" | "system";
 

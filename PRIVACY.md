@@ -58,15 +58,15 @@ no amount of work on this end changes it. The VAPID subject is configurable
 require a contact and the shipped placeholder is not one.
 
 **What the notification says.** By default, nothing you wrote. A notification
-carries three facts — which agent settled (the session's own agent, or a delegated
-task), how it went, and what the work amounted to as a count ("12 tool calls · 3
-files changed"). None of that is text you typed: it is either the harness's own
-vocabulary or a count of tool calls.
+carries three facts — which agent settled (the session's own agent, or the
+gateway itself), how it went, and what the work amounted to as a count ("12 tool
+calls · 3 files changed · 2 delegations"). None of that is text you typed: it is
+either the harness's own vocabulary or a count of tool calls.
 
-The one generated addition is a delegated task's own description, which the model
-wrote to summarise work you asked for rather than being your prompt itself;
-`push.includeTaskNames: false` drops it, at the cost of every subagent finishing
-as an identical "Subagent finished".
+A delegated child is not something a notification is about, so the one piece of
+generated text that used to reach a lock screen — the task description the model
+wrote for a child — no longer has a path there at all. It still appears in the
+app, on the settlement row for the child it belongs to.
 
 What is *not* in a notification by default is the session's title. That default
 exists because a notification is the least private place this data could go — it
@@ -158,14 +158,14 @@ activity screen survives a reload:
 - `dsh.activity.read.v1` — a single timestamp: how far you have acknowledged,
   which is all the unread badge is computed from.
 
-Both are device-local and nothing in them is sent back to the gateway. **Two of
-those fields can hold text the model wrote**, which is worth saying plainly
-rather than calling the list "metadata": a delegated task's row carries the
-child's own closing message (up to 400 characters of arbitrary model output), and
-a failed turn's row carries the harness's failure detail. A row also names a
-delegated task by the description the model wrote for it when
-`push.includeTaskNames` is on — the same text that reaches the lock screen, and
-`false` keeps it out of both. No prompt you typed and no tool argument is stored.
+Both are device-local and nothing in them is sent back to the gateway. **Three
+fields can hold text the model wrote**, which is worth saying plainly rather than
+calling the list "metadata": a delegated task's row carries the child's own
+closing message (up to 400 characters of arbitrary model output) and is named by
+the description the model wrote for that task — both read from the session's own
+stream, and neither sent anywhere — and a failed turn's row carries the harness's
+failure detail. No prompt you typed is stored, and no tool call's arguments are
+kept: for a delegation, only that one-line description survives here.
 
 Clearing site data removes both keys, and nothing else depends on them. Where
 storage is unavailable — Safari in a private window, or a browser with storage

@@ -526,6 +526,48 @@ func TestMetaCarriesPreviewAndCount(t *testing.T) {
 	}
 }
 
+// TestMetaCarriesTheSessionsOrigin is the difference between a session a person
+// opened and one the harness created to answer a delegation.
+//
+// It matters beyond the row it is read for: a child has turns of its own, and
+// anything deciding whether a finished turn is worth announcing has to be able
+// to tell the two apart. The header is the only place the harness writes it, so
+// this is the only place it can be read from.
+func TestMetaCarriesTheSessionsOrigin(t *testing.T) {
+	header := func(extra string) []string {
+		return []string{
+			`{"type":"session","version":4,"id":"` + testSession + `","cwd":"/tmp/ws"` + extra + `}`,
+			`{"type":"turn/start","seq":1,"time":1790519692979,"data":{"turn":1}}`,
+		}
+	}
+
+	cases := []struct {
+		name   string
+		extra  string
+		origin string
+	}{
+		{name: "a session a person opened carries no origin", extra: ""},
+		{name: "a delegated child says so", extra: `,"parentSession":"session-parent","isSeeded":false,"origin":"subagent","delegationDepth":1`, origin: OriginSubagent},
+		// A fork inherits the lineage but is still the operator's own session,
+		// which is why the origin and not the parent is what gets read.
+		{name: "a fork is not a child", extra: `,"parentSession":"session-parent","isSeeded":true,"delegationDepth":0`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeLog(t, root, "--ws--", testSession, header(tc.extra))
+			meta, err := newTestStore(t, root).Meta(context.Background(), testSession)
+			if err != nil {
+				t.Fatalf("Meta: %v", err)
+			}
+			if meta.Origin != tc.origin {
+				t.Errorf("Origin = %q, want %q", meta.Origin, tc.origin)
+			}
+		})
+	}
+}
+
 // TestPreviewIgnoresInjectionsAndTruncates: DSH writes runtime context and a
 // skill catalogue as user-role messages, and either would be a useless preview.
 func TestPreviewIgnoresInjectionsAndTruncates(t *testing.T) {

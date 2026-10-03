@@ -118,62 +118,67 @@ Revoking the calling device's own id is allowed and takes effect immediately.
 
 Web Push, so a phone that is not looking still learns what it cannot afford to
 miss: an approval waiting on a human, an approval that **expired** and was
-therefore refused, a turn that finished after running longer than
-`push.turnThreshold`, a turn that **failed** at any length, a **delegated task**
-that settled (see below), and the agent process giving up. An expiry is the one
-worth calling out: the operator who missed the first notification would otherwise
-never learn that the tool did not run.
+therefore refused, a turn of the session's own agent that finished after running
+longer than `push.turnThreshold`, a turn that **failed** at any length, and the
+agent process giving up. An expiry is the one worth calling out: the operator who
+missed the first notification would otherwise never learn that the tool did not
+run.
+
+A **delegated task** is deliberately not on that list. A child agent settles
+inside its parent's turn, and the parent keeps working afterwards, so announcing
+the child reports "done" over work that is still running; the turn's own
+notification is the one that answers "is it done?", and it counts the delegations
+in its summary when it does. A child *session* is silent for the same reason —
+the harness gives it a log and turns like any other session, but nobody opened it
+and nothing waits on it. The child's work still appears in the app, where a
+settlement is a row in the conversation.
 
 ### What a notification says
 
 A notification is a sentence — `title` and `body` — plus the same facts in
 structured form, because the sentence alone made every notification look alike: a
-reader could see that *something* had finished, never that it was a delegated
-child rather than the main agent, and never what the work amounted to.
+reader could see that *something* had finished, never whether it was the agent or
+the gateway reporting, and never what the work amounted to.
 
 ```json
 {
-  "title": "completed · Subagent · Research deps",
-  "body": "Research deps · 12 tool calls · 3 files changed",
+  "title": "completed · Main agent · Refactor the retry logic",
+  "body": "12 tool calls · 3 files changed · 2 delegations · 1 failure",
   "url": "./#/sessions/…",
-  "tag": "task-call_abc",
+  "tag": "turn-session_abc",
   "sessionId": "…",
-  "actor": { "kind": "subagent", "name": "Research deps" },
-  "summary": "12 tool calls · 3 files changed",
+  "actor": { "kind": "main" },
+  "summary": "12 tool calls · 3 files changed · 2 delegations · 1 failure",
   "outcome": "completed"
 }
 ```
 
 * `actor` is **who the notification is about**: `main` for the session's own
-  agent, `subagent` for a delegation (named by the task it was given when
-  `push.includeTaskNames` is on), `system` for the gateway itself. It is what
-  makes two notifications distinguishable without opening the app.
+  agent, `system` for the gateway itself — an approval that expired, a harness
+  that gave up. It is what makes two notifications distinguishable without
+  opening the app.
 * `summary` is what the work amounted to, counted from the tool calls that
-  settled during it — `12 tool calls · 3 files changed · 1 failure`. A non-zero
-  exit counts as a failure here, because DSH reports one as a status rather than
-  an error.
+  settled during it — `12 tool calls · 3 files changed · 2 delegations · 1
+  failure`. A non-zero exit counts as a failure here, because DSH reports one as
+  a status rather than an error. Delegations are counted rather than announced,
+  which is the only trace a child leaves in a notification.
 * `outcome` is one word: `completed`, `failed`, `cancelled`, `waiting` (an
   approval), `expired`.
-* `tag` is what collapses repeats. A turn's tag is per session and a delegation's
-  is per call, so a child settling never replaces the notification about the turn
-  that spawned it.
+* `tag` is what collapses repeats. A turn's tag is per session and an approval's
+  is per request, so a second approval in another session does not stack behind
+  the first.
 
-A delegated task settles when its tool call does, which is usually **before** the
-parent turn ends: the point of delegating is that the answer exists while the main
-agent is still working. It is notified on the same rule as a turn — long enough to
-be worth an interruption, or failed at any length — and every notification is
-mirrored to chat channels when any are configured, including the short ones Web
-Push stays silent about.
+Every notification is mirrored to chat channels when any are configured,
+including the short turns Web Push stays silent about — a chat message is read at
+the reader's convenience rather than competing with whatever they are doing.
 
 ### Session naming and privacy
 
 The title names the session when the deployment has one to name, which is what
 makes two notifications from two sessions distinguishable at a glance. The `body`
-carries the operator's own words only with `push.includeSessionName`, and a
-delegated task is named only with `push.includeTaskNames` (on by default: without
-it, three subagents finishing in one session produce three identical "Subagent
-finished" notifications). Both are read on a lock screen and mirrored to any
-configured webhook, which is why they are switches.
+carries the operator's own words only with `push.includeSessionName`. Both are
+read on a lock screen and mirrored to any configured webhook, which is why it is
+a switch.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -814,7 +819,7 @@ Server frames:
 | `approval.requested` | See above. |
 | `approval.resolved` | `data = { id, optionId, decidedBy, tool, sessionId, grantId }`. `decidedBy` is `operator` when a person answered, and `timeout` or `shutdown` when the tool was refused because nobody did — a client that rendered those the same way would tell the operator their agent stopped for a reason it did not. |
 | `approval.granted` | A standing grant answered a request, so no prompt was shown. `data = { grant, tool, input }`. It is separate from `approval.resolved` because the two say different things: one is "you decided", this is "a decision you made earlier applied here". |
-| `turn.state` | `data = { turnId, state: "queued" \| "running" \| "completed" \| "cancelled" \| "failed", position?, queueDepth?, queuedAt?, startedAt?, stopReason?, detail? }`. `startedAt` is sent on every state including the settled ones, because a phone that reconnects mid-turn needs the start rather than the duration so far — the event that announced it may be long past the replay window. A queued ticket is republished whenever the queue moves. |
+| `turn.state` | `data = { turnId, state: "queued" \| "running" \| "completed" \| "cancelled" \| "failed", position?, queueDepth?, queuedAt?, startedAt?, stopReason?, detail?, subagent? }`. `startedAt` is sent on every state including the settled ones, because a phone that reconnects mid-turn needs the start rather than the duration so far — the event that announced it may be long past the replay window. A queued ticket is republished whenever the queue moves. `subagent` is true when the turn belongs to a session the harness created to answer a delegation rather than one a person opened; the log watcher is the only producer that can know, and it is what lets a consumer keep a child's turns out of the notification policy. |
 | `harness.state` | The DSH child process: `data = { state: "starting" \| "ready" \| "restarting" \| "failed", detail? }`. |
 | `resync` | The cursor could not be honoured. `data = { reason }`, where the reason is one of `the gateway restarted`, `cursor is ahead of this gateway`, `replay window exceeded`, `events were dropped for a slow client`. It is always followed by a `snapshot`. A client refetches what it is showing. |
 | `snapshot` | The present state, sent after a `resync` and when a connection first subscribes to a session. `data = { generation, seq, time, harness, turns, approvals }`, where `turns` is one `{ sessionId, running, queued }` per session with a turn and `approvals` is exactly what `GET /approvals` returns. Everything at or below `seq` is already reflected in the snapshot; frames after it are deltas, so a client that applies the snapshot and then accepts only strictly greater sequence numbers converges without a gap and without a duplicate. A session absent from `turns` has no turn — a claim a snapshot can make and an event stream cannot. |

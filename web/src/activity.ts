@@ -20,7 +20,7 @@
  *     reads correctly in yesterday's activity.
  */
 
-/** Who an activity is about. Mirrors the gateway's own vocabulary. */
+/** Who an activity is about. Mirrors the app's Actor in `types.ts`. */
 export type ActorKind = "main" | "subagent" | "system";
 
 export interface Actor {
@@ -79,7 +79,11 @@ export function outcomeLabel(outcome: Outcome | "completed"): string {
   }
 }
 
-/** How an actor prints, in the same words the gateway's notifications use. */
+/**
+ * How an actor prints: the words the gateway's notifications use for the two
+ * actors they share, plus the delegated child, which only the app ever shows —
+ * a child's settlement is a row in the conversation, never a notification.
+ */
 export function actorLabel(actor: Actor): string {
   switch (actor.kind) {
     case "subagent":

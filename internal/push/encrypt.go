@@ -65,10 +65,10 @@ func (s Subscription) Validate() error {
 // Title and Body are the sentence a lock screen renders. The fields below them
 // are the same facts in structured form, and they exist because the sentence
 // alone made every notification look alike: a reader could see that *something*
-// had finished, never that it was a delegated task rather than the main agent,
-// and never what the work amounted to. The client is not required to read them —
-// a notification that only renders Title and Body is still correct — but a
-// client that does can group, filter and label what arrives.
+// had finished, never whether it was the agent or the gateway reporting, and
+// never what the work amounted to. The client is not required to read them — a
+// notification that only renders Title and Body is still correct — but a client
+// that does can group, filter and label what arrives.
 type Message struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
@@ -79,8 +79,8 @@ type Message struct {
 	Tag string `json:"tag,omitempty"`
 	// SessionID lets the client deep-link without parsing the URL.
 	SessionID string `json:"sessionId,omitempty"`
-	// Actor is who the notification is about: the main agent, a named
-	// delegation, or the gateway itself.
+	// Actor is who the notification is about: the session's own agent, or the
+	// gateway itself.
 	Actor *Actor `json:"actor,omitempty"`
 	// Summary is what the work amounted to, when there is something to count.
 	Summary string `json:"summary,omitempty"`

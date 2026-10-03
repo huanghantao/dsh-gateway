@@ -497,11 +497,6 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 			// have been put here. What still names the session is the *title*,
 			// which is what makes two notifications distinguishable at a glance.
 			IncludeSessionName: cfg.Push.IncludeSessionName,
-			// On unless turned off, and a different decision: a delegated task's
-			// description is generated text summarising work the operator asked
-			// for, and without it three subagents finishing in one session are
-			// three identical notifications.
-			IncludeTaskNames: cfg.Push.IncludeTaskNames,
 			Describe: func(ctx context.Context, sessionID string) string {
 				if history == nil {
 					return ""

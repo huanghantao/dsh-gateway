@@ -71,13 +71,27 @@ const (
 	RoleNotice Role = "notice"
 )
 
-// The actors a notice can be about. The words are the wire vocabulary, shared
-// with the push package's actor kinds so that one client vocabulary covers a
-// notification and a transcript row.
+// The actors a notice can be about.
+//
+// This is the *transcript's* vocabulary, and it is deliberately wider than the
+// notification's: a delegated child settles as a row in the conversation, so a
+// reader scrolling history has to be told which agent a row belongs to, while a
+// notification is only ever about the main agent or the gateway itself. See
+// push.ActorKind for the other half.
 const (
 	// ActorSubagent marks a delegated child agent's own report.
 	ActorSubagent = "subagent"
 )
+
+// OriginSubagent is how a session's log header classifies a delegated child:
+// the harness writes `origin: "subagent"` for a session it started to answer a
+// `subagent` call, and writes no origin at all for one a person opened.
+//
+// The lineage field beside it — `parentSession` — cannot stand in for this: a
+// forked session inherits the same field and is still the operator's own
+// session, so filtering on it would silence exactly the sessions a person is
+// waiting on.
+const OriginSubagent = "subagent"
 
 // How a settled thing ended. They appear on a notice's Outcome so a client can
 // colour a row without reading the prose.
@@ -183,6 +197,12 @@ type Meta struct {
 	// TurnRunning is true when the log's last turn boundary was a start: the
 	// session is being written to right now, by whoever holds it.
 	TurnRunning bool `json:"turnRunning,omitempty"`
+	// Origin is the harness's own classification of the session, read from the
+	// log header: OriginSubagent for a delegated child, empty for a session a
+	// person opened. It is what tells the two apart downstream — a child's turn
+	// is not the main agent's work, and nothing should announce it as though it
+	// were.
+	Origin string `json:"origin,omitempty"`
 
 	// Preview is the opening thing the operator typed, truncated to one line.
 	//

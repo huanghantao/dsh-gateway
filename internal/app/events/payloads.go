@@ -46,6 +46,18 @@ type TurnState struct {
 	StopReason string `json:"stopReason,omitempty"`
 	// Detail explains a failure, and is empty otherwise.
 	Detail string `json:"detail,omitempty"`
+
+	// Subagent marks a turn belonging to a session the harness created to answer
+	// a delegation, rather than one a person opened.
+	//
+	// The watcher is the only producer that meets those sessions at all, and it
+	// is the only one that sets this: a child session is a session like any
+	// other on disk, with turns of its own, so without the mark a phone would be
+	// told the main agent had finished every time a child it never opened
+	// stopped working. It is a fact about the session rather than about the
+	// turn, and it travels here because this frame is where the notification
+	// policy meets a session.
+	Subagent bool `json:"subagent,omitempty"`
 }
 
 // HarnessState is the payload of TypeHarnessState.

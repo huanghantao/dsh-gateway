@@ -285,6 +285,11 @@ func (p *parser) feedSession(line []byte) {
 		ID        string `json:"id"`
 		CreatedAt int64  `json:"createdAt"`
 		Cwd       string `json:"cwd"`
+		// Origin is absent on an ordinary session and "subagent" on a delegated
+		// child. The header is the only place the harness records it, and the
+		// difference decides whether a settled turn is a person's work or a
+		// child reporting back to one.
+		Origin string `json:"origin"`
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
 		p.debug("session header", err)
@@ -295,6 +300,7 @@ func (p *parser) feedSession(line []byte) {
 	}
 	p.meta.Workspace = ev.Cwd
 	p.meta.CreatedAt = fromMillis(ev.CreatedAt)
+	p.meta.Origin = ev.Origin
 }
 
 func (p *parser) feedTitle(line []byte) {
