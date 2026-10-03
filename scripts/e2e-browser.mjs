@@ -757,6 +757,91 @@ async function main() {
   );
   await screenshot('6-reconnect');
 
+  // --- a tool card has to settle *in place* ---------------------------------
+  //
+  // Every check above looks at the DOM after the fact, and none of them can see
+  // this bug: a freshly mounted transcript is rendered from the finished log, so
+  // its cards are right by construction. The live path is where they were not.
+  // The feed reconciled by key alone, and a call's key does not change when its
+  // result lands — so a card published as running kept saying "running" and
+  // never showed its output until the page was reloaded. That is the one thing
+  // this screen promises ("watch tools run"), so it is driven here for real: a
+  // second turn, with the app watching, and the card has to finish on screen.
+  //
+  // The same turn is the only place the prompt *echo* can be observed. A prompt
+  // sent over the API is a row no client typed, so it can only appear if the
+  // gateway published it — which is what a phone that was asleep when someone
+  // else prompted depends on, and what it must fold against its own copy when it
+  // did type it.
+  const liveCard = await evaluate(`(async () => {
+    const prompt = ${JSON.stringify('Run `echo settle-ok` with the bash tool, then stop.')};
+    const before = document.querySelectorAll('.tool').length;
+    const r = await fetch('/api/v1/sessions/${created.id}/prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ blocks: [{ type: 'text', text: prompt }] }),
+    });
+    if (r.status !== 202) {
+      return { error: 'the second prompt was rejected: ' + r.status + ' ' + JSON.stringify(await r.json()) };
+    }
+    const deadline = Date.now() + 180000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const cards = [...document.querySelectorAll('.tool')].slice(before);
+      if (cards.length === 0) continue;
+      const statuses = cards.map((c) => (c.querySelector('.tool-status') || {}).textContent || '');
+      if (statuses.includes('running')) continue;
+      // The *turn* has to be over too, not just the card: the step that follows
+      // this one starts a turn of its own and reads the composer to decide what
+      // it is looking at, so leaving work in flight here would make that reading
+      // describe this turn instead.
+      const stop = document.querySelector('.composer-stop');
+      if (stop !== null && !stop.hidden) continue;
+      const last = cards[cards.length - 1];
+      // The prompt itself has to be on screen too, and exactly once. No client
+      // typed it — it went in over the API — so the only way it can appear is
+      // the gateway echoing it to every subscriber, which is what a phone that
+      // was asleep when someone else prompted depends on.
+      const asked = [...document.querySelectorAll('.msg-user')].filter(
+        (row) => (row.querySelector('.msg-body') || {}).textContent === prompt,
+      ).length;
+      return {
+        count: cards.length,
+        statuses,
+        asked,
+        bodyChars: (last.querySelector('.tool-body') || { textContent: '' }).textContent.trim().length,
+        detail: (last.querySelector('.tool-detail') || {}).textContent || '',
+      };
+    }
+    return {
+      error:
+        'a tool card published during a live turn never settled on screen: ' +
+        JSON.stringify([...document.querySelectorAll('.tool')].slice(before).map((c) => ({
+          name: (c.querySelector('.tool-name') || {}).textContent || '',
+          status: (c.querySelector('.tool-status') || {}).textContent || '',
+        }))),
+    };
+  })()`);
+  if (liveCard.error) {
+    throw new Error(liveCard.error);
+  }
+  if (liveCard.bodyChars === 0) {
+    throw new Error('the tool card that settled live shows nothing in its body');
+  }
+  if (liveCard.asked !== 1) {
+    throw new Error(
+      `a prompt sent over the API rendered ${liveCard.asked} time(s) on a watching phone, want exactly one: ` +
+        'the gateway echoes an admitted prompt to every client, and the client has to fold that echo ' +
+        'against its own copy',
+    );
+  }
+  step(
+    30,
+    `a live tool card settled in place (${liveCard.count} card(s), status ${JSON.stringify(liveCard.statuses)}, ` +
+      `${liveCard.bodyChars} chars of body) and the prompt sent over the API rendered once`,
+  );
+
+
   // --- a reload in the middle of a turn must keep Stop -----------------------
   //
   // The event stream carries no snapshot of a turn already in flight: the
