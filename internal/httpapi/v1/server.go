@@ -16,6 +16,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
@@ -29,6 +30,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/pairing"
 	"github.com/huanghantao/dsh-gateway/internal/push"
 	"github.com/huanghantao/dsh-gateway/internal/sessionlog"
+	"github.com/huanghantao/dsh-gateway/internal/workspace"
 )
 
 // Follower reports which sessions another DSH process is running right now.
@@ -48,8 +50,11 @@ type Deps struct {
 	Bus       *events.Bus
 	Leases    *lease.Manager
 	Approvals *approvals.Broker
-	Harness   harness.Harness
-	Sessions  *sessionlog.Store
+	// Turns admits and runs prompts. It is the single answer to "is a turn
+	// running", which is why the lease consults it rather than keeping a flag.
+	Turns    *turns.Scheduler
+	Harness  harness.Harness
+	Sessions *sessionlog.Store
 	// Trash holds deleted sessions. Nil means deletion is not offered at all.
 	Trash *sessionlog.Trash
 	// Curation is the operator's archive and pin lists, from this phone and from
@@ -65,6 +70,11 @@ type Deps struct {
 	// Webhooks are chat channels that receive the same notifications. They are
 	// how a phone that cannot reach Google's push service still gets told.
 	Webhooks []push.Webhook
+	// Workspace undoes recorded changes. Nil means this gateway is read-only
+	// over the workspace, which is the default and the whole security posture:
+	// an undo is the only thing here that writes, so its absence is a code path
+	// that does not exist rather than one that is switched off.
+	Workspace *workspace.Reverter
 	// Follower may be nil, in which case only leased sessions are ever busy.
 	Follower Follower
 	Auth     *devicetoken.Authenticator
@@ -205,11 +215,22 @@ func (s *Server) routes() []route {
 		{method: "POST", pattern: "/api/v1/sessions/{id}/lease", handler: authed(s.handleAcquireLease)},
 		{method: "DELETE", pattern: "/api/v1/sessions/{id}/lease", handler: authed(s.handleReleaseLease)},
 		{method: "GET", pattern: "/api/v1/sessions/{id}/transcript", handler: authed(s.handleTranscript)},
+		// What the session changed. Reading is always available; the undo beside
+		// it is not, and answers 403 when the deployment is read-only.
+		{method: "GET", pattern: "/api/v1/sessions/{id}/changes", handler: authed(s.handleChanges)},
+		{method: "POST", pattern: "/api/v1/sessions/{id}/revert", handler: authed(s.handleRevert)},
 		{method: "POST", pattern: "/api/v1/sessions/{id}/prompt", handler: authed(s.handlePrompt)},
 		{method: "POST", pattern: "/api/v1/sessions/{id}/cancel", handler: authed(s.handleCancel)},
+		// Dropping one queued follow-up is not stopping the turn, so it is its
+		// own verb rather than a query parameter on cancel.
+		{method: "DELETE", pattern: "/api/v1/sessions/{id}/queue/{turnId}", handler: authed(s.handleDropQueued)},
 
 		{method: "GET", pattern: "/api/v1/approvals", handler: authed(s.handleListApprovals)},
 		{method: "POST", pattern: "/api/v1/approvals/{id}", handler: authed(s.handleDecideApproval)},
+		// Standing authorisations are a resource, not a detail of the sheet: the
+		// only way to know one is in force is to be able to look.
+		{method: "GET", pattern: "/api/v1/approvals/grants", handler: authed(s.handleListGrants)},
+		{method: "DELETE", pattern: "/api/v1/approvals/grants/{id}", handler: authed(s.handleRevokeGrant)},
 
 		// The event stream checks the same credential itself, inside the handler,
 		// because a WebSocket handshake cannot carry a custom header from a

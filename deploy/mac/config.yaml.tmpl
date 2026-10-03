@@ -93,6 +93,23 @@ session:
   # How long an approval waits for a human before it is rejected. It is
   # rejected, never allowed — an unanswered request must fail closed.
   approvalTimeout: "5m"
+  # How long a *scoped* approval lasts. Answering a prompt with "allow bash in
+  # this session" records a rule that then answers matching requests without
+  # asking, until this expires. It is bounded on three axes — one session, one
+  # tool, and this lifetime — and it dies with the session that made it.
+  #
+  # Set this to 0 to disable scoped approvals entirely: only "allow once" and
+  # "reject once" are then offered, and every invocation needs its own answer.
+  # Read docs/security.md §6.1 before turning it on.
+  approvalGrantTTL: "30m"
+  # How many prompts may wait behind a running turn in one session. A follow-up
+  # typed while the agent works is queued and runs when the turn finishes,
+  # instead of being refused and lost — which on a phone is the difference
+  # between a thought kept and a thought retyped.
+  #
+  # 0 refuses a mid-turn prompt with 409, the strict behaviour earlier versions
+  # had.
+  promptQueueDepth: 4
   # What a NEW session starts with when the app does not choose — the row the
   # new-session sheet preselects. Both values are ACP option ids, which are
   # opaque and defined by the harness, so read them off the app's own picker
@@ -120,8 +137,11 @@ session:
   replayBuffer: 1024
 
 limits:
-  # 1 MiB. Prompts are text; this is not an upload endpoint.
-  maxBodyBytes: 1048576
+  # 8 MiB. A prompt may now carry an image — the app downscales a photograph to
+  # fit inside 1568px before sending, which lands well under this — and the body
+  # limit is what a request is actually bounded by, since base64 inflates an
+  # image by a third on the wire.
+  maxBodyBytes: 8388608
   readHeaderTimeout: "10s"
   readTimeout: "60s"
   # 0 = no write deadline. Streaming responses and WebSockets manage their own
@@ -131,6 +151,10 @@ limits:
   shutdownTimeout: "20s"
   maxPromptBytes: 262144
   maxConcurrentTurns: 4
+  # A per-image cap, decoded. 0 means no bound tighter than maxBodyBytes above,
+  # which is the real ceiling either way. Set it lower to say what a prompt may
+  # contain rather than what a request may weigh.
+  maxImageBytes: 0
 
 # The stock DSH browser GUI, proxied through the gateway, is OFF. When it is
 # enabled it hands out an agent with arbitrary command execution behind a single
@@ -239,6 +263,21 @@ push:
 # disjoint: fresh prompt tokens, cache-read prompt tokens, and output.
 receipt:
   pricing: []
+
+# Undoing a session's recorded file changes.
+#
+# OFF BY DEFAULT, and worth leaving off unless you want it: this is the only
+# feature in the gateway that writes to your files. With it off the gateway
+# constructs no reverter at all, so there is no reachable path that opens a file
+# for writing. Turning it on lets the phone reverse the edits a session
+# recorded — exact-match only, inside the workspace allowlist below, refused
+# while the agent is running, and audited as `workspace.reverted`.
+#
+# Reading what a session changed needs none of this: the change screen works
+# either way, because it is a projection of the session log.
+changes:
+  revert:
+    enabled: false
 
 # Workspace roots the phone may open. The client must pick one of these; it can
 # never supply an arbitrary path. Required: the installer refuses to run without

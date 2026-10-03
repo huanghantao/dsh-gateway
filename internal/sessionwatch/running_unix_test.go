@@ -68,7 +68,11 @@ func TestRunningNeedsBothAnOpenTurnAndALiveWriter(t *testing.T) {
 		case events.TypeSessionState:
 			busy = e.Data.(map[string]any)["busy"] == true
 		case events.TypeTurnState:
-			running = e.Data.(map[string]any)["state"] == "running"
+			state, ok := e.Data.(events.TurnState)
+			if !ok {
+				t.Fatalf("turn.state payload = %T, want events.TurnState", e.Data)
+			}
+			running = state.State == "running"
 		default:
 			// The bus carries eleven frame types; a test asserting on two of them
 			// is not an omission.
@@ -111,7 +115,7 @@ func TestTurnBoundariesBecomeState(t *testing.T) {
 				busy = true
 			}
 		case events.TypeTurnState:
-			if e.Data.(map[string]any)["state"] == "running" {
+			if state, ok := e.Data.(events.TurnState); ok && state.State == "running" {
 				running = true
 			}
 		default:
@@ -128,7 +132,7 @@ func TestTurnBoundariesBecomeState(t *testing.T) {
 
 	var completed bool
 	for _, e := range drain(sub) {
-		if e.Type == events.TypeTurnState && e.Data.(map[string]any)["state"] == "completed" {
+		if state, ok := e.Data.(events.TurnState); e.Type == events.TypeTurnState && ok && state.State == "completed" {
 			completed = true
 		}
 	}

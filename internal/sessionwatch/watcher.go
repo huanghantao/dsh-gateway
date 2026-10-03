@@ -368,9 +368,9 @@ func (w *Watcher) publishTurn(sessionID string, running bool, turnCount int) {
 		state = "running"
 	}
 	w.opts.Bus.Publish(events.TypeSessionState, sessionID, map[string]any{"busy": running})
-	w.opts.Bus.Publish(events.TypeTurnState, sessionID, map[string]any{
-		"turnId": fmt.Sprintf("log-%d", turnCount+1),
-		"state":  state,
+	w.opts.Bus.Publish(events.TypeTurnState, sessionID, events.TurnState{
+		TurnID: fmt.Sprintf("log-%d", turnCount+1),
+		State:  state,
 	})
 }
 

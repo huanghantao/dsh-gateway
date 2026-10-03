@@ -44,6 +44,12 @@ const (
 	TypeApprovalRequested Type = "approval.requested"
 	// TypeApprovalResolved reports a decision.
 	TypeApprovalResolved Type = "approval.resolved"
+	// TypeApprovalGranted reports that a standing grant, rather than a person,
+	// answered a request. It is separate from TypeApprovalResolved because the
+	// two say different things to a reader: one is "you decided", the other is
+	// "a decision you made earlier applied here", and a client that folded them
+	// together would show an automated yes as a fresh human judgement.
+	TypeApprovalGranted Type = "approval.granted"
 	// TypeTurnState reports turn lifecycle.
 	TypeTurnState Type = "turn.state"
 	// TypeHarnessState reports the child process lifecycle.

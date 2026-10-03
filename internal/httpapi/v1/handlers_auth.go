@@ -202,6 +202,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	body["limits"] = map[string]any{
 		"maxPromptBytes": s.deps.Config.Limits.MaxPromptBytes,
 		"maxBodyBytes":   s.deps.Config.Limits.MaxBodyBytes,
+		"maxImageBytes":  s.imageLimit(),
 		"transcriptPage": s.deps.Config.Transcript.PageSize,
 	}
 	body["features"] = map[string]any{
@@ -210,6 +211,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"imagePrompts":          s.deps.Harness.Capabilities().CanPromptImages,
 		"approvalTimeoutSecs":   int(s.deps.Config.Session.ApprovalTimeout.Std().Seconds()),
 		"sessionIdleTimeoutSec": int(s.deps.Config.Session.IdleTimeout.Std().Seconds()),
+		// Zero means scoped approvals are off, and a client that reads it must
+		// not offer the choices that would create one.
+		"approvalGrantTTLSecs": int(s.deps.Config.Session.ApprovalGrantTTL.Std().Seconds()),
+		// How many prompts may wait behind a running turn. Zero tells a client
+		// to disable its composer mid-turn rather than collecting text the
+		// gateway will refuse.
+		"promptQueueDepth": s.deps.Config.Session.PromptQueueDepth,
+		"revertEnabled":    s.deps.Config.Changes.Revert.Enabled,
 	}
 
 	_ = httpcore.RespondJSON(w, http.StatusOK, body)

@@ -77,3 +77,37 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// handleListGrants returns the standing authorisations that are currently
+// answering approvals without asking.
+//
+// It is a first-class resource rather than a detail of the approval sheet: an
+// authorisation that is in force has to be visible somewhere, or the only way to
+// know one exists is to remember giving it.
+func (s *Server) handleListGrants(w http.ResponseWriter, _ *http.Request) {
+	_ = httpcore.RespondJSON(w, http.StatusOK, map[string]any{
+		"grants": s.deps.Approvals.Grants(),
+	})
+}
+
+// handleRevokeGrant withdraws a standing authorisation.
+//
+// The next request that would have matched it asks a human again, which is the
+// whole point: revoking has to take effect immediately or it is not a control.
+func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	if !s.deps.Approvals.RevokeGrant(id) {
+		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()),
+			errx.New(errx.KindNotFound, "no_such_grant",
+				"that authorisation is not in force; it may have expired"))
+		return
+	}
+
+	principal, _ := principalFrom(r.Context())
+	s.deps.Audit.Record(r.Context(), audit.EventApprovalGrantRevoked, "", map[string]any{
+		"deviceId": principal.DeviceID,
+		"grantId":  id,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}

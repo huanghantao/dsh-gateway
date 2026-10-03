@@ -47,6 +47,19 @@ const (
 	// most important record in the log: it is the trace of a human authorising
 	// a command to run on their machine.
 	EventApprovalDecided Event = "approval.decided"
+	// EventApprovalGrantRevoked records a standing authorisation being withdrawn.
+	//
+	// A grant is the one way a tool can run without a person answering *this*
+	// prompt, so both ends of it are audited: the decision that created it is an
+	// EventApprovalDecided carrying a scoped option, and this is the record that
+	// it stopped applying.
+	EventApprovalGrantRevoked Event = "approval.grant_revoked"
+	// EventWorkspaceReverted records an undo writing to the operator's files.
+	//
+	// It is the only audit event describing a change this gateway made to a
+	// workspace rather than one it observed, which makes it the record to read
+	// when a file is not what someone left it as.
+	EventWorkspaceReverted Event = "workspace.reverted"
 	// EventHarnessRestarted records the supervised DSH process restarting.
 	EventHarnessRestarted Event = "harness.restarted"
 	// EventHarnessFailed records a harness fault the operator may need to act on.

@@ -85,6 +85,7 @@ type Config struct {
 	Push       Push       `yaml:"push"`
 	Receipt    Receipt    `yaml:"receipt"`
 	Curation   Curation   `yaml:"curation"`
+	Changes    Changes    `yaml:"changes"`
 }
 
 // Log configures the process logger.
@@ -161,6 +162,22 @@ type Session struct {
 	// ApprovalTimeout bounds how long an approval waits for a human; on expiry
 	// the request is rejected (fail closed).
 	ApprovalTimeout Duration `yaml:"approvalTimeout"`
+	// ApprovalGrantTTL bounds how long a scoped approval lasts. Choosing a
+	// scoped option on a prompt — "this tool, in this session" — records a rule
+	// that then answers matching requests without asking again, and this is when
+	// that rule expires.
+	//
+	// Zero disables scoped grants entirely: the broker offers only the harness's
+	// own allow-once and reject-once, every tool call needs its own answer, and
+	// the app does not offer the scoped options at all.
+	ApprovalGrantTTL Duration `yaml:"approvalGrantTTL"`
+	// PromptQueueDepth is how many prompts may wait behind a running turn in one
+	// session. A prompt that arrives while the agent works is queued and runs
+	// when the turn finishes, instead of being refused and lost.
+	//
+	// Zero refuses a mid-turn prompt with 409, which is the strict behaviour a
+	// deployment that wants exactly one prompt at a time can ask for.
+	PromptQueueDepth int `yaml:"promptQueueDepth"`
 	// DefaultModel and DefaultReasoningEffort are what a new session starts
 	// with when the client does not choose — the app's "Gateway default".
 	//
@@ -191,6 +208,14 @@ type Limits struct {
 	ShutdownTimeout    Duration `yaml:"shutdownTimeout"`
 	MaxPromptBytes     int      `yaml:"maxPromptBytes"`
 	MaxConcurrentTurns int      `yaml:"maxConcurrentTurns"`
+	// MaxImageBytes bounds one image prompt block, decoded. Zero — the default —
+	// means no bound tighter than the request body limit, which is what actually
+	// caps a request in practice: the body carries an image base64-encoded, so it
+	// is a third larger on the wire than the number checked here.
+	//
+	// A positive value caps one image below that, which is a policy about what a
+	// prompt may contain rather than a limit on the request.
+	MaxImageBytes int `yaml:"maxImageBytes"`
 }
 
 // DesktopUI exposes the stock DSH browser GUI behind the gateway.
@@ -260,6 +285,24 @@ type Receipt struct {
 	// daemon has no business shelling out to a CLI that holds credentials, and a
 	// price that changed under an old session would rewrite history.
 	Pricing []ModelPrice `yaml:"pricing"`
+}
+
+// Changes controls the "what did this session change" screen.
+//
+// Reading is always available while the session log is: the projection answers
+// from the agent's own record of its edits and touches nothing in the workspace.
+// Writing is not, and that asymmetry is the whole point of this struct.
+type Changes struct {
+	Revert Revert `yaml:"revert"`
+}
+
+// Revert controls undoing a session's edits in the workspace.
+//
+// Off by default. Turning it on is the only way any part of this gateway writes
+// to an operator's files, so a deployment that leaves it off has no such code
+// path reachable at all — not a disabled branch, an unconstructed one.
+type Revert struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ModelPrice is one model's unit prices, per million tokens.
@@ -376,14 +419,19 @@ func Default() Config {
 			Burst:             24,
 		},
 		Session: Session{
-			IdleTimeout:     Duration(5 * time.Minute),
-			PromptTimeout:   Duration(30 * time.Minute),
-			ApprovalTimeout: Duration(5 * time.Minute),
-			EventBuffer:     256,
-			ReplayBuffer:    1024,
+			IdleTimeout:      Duration(5 * time.Minute),
+			PromptTimeout:    Duration(30 * time.Minute),
+			ApprovalTimeout:  Duration(5 * time.Minute),
+			ApprovalGrantTTL: Duration(30 * time.Minute),
+			PromptQueueDepth: 4,
+			EventBuffer:      256,
+			ReplayBuffer:     1024,
 		},
 		Limits: Limits{
-			MaxBodyBytes:       1 << 20, // 1 MiB: prompts are text, not uploads
+			// 8 MiB rather than the 1 MiB a text-only prompt needed: a phone
+			// photograph is a few megabytes, and this is the ceiling the body
+			// limit has to clear before maxImageBytes can mean anything.
+			MaxBodyBytes:       8 << 20,
 			ReadHeaderTimeout:  Duration(10 * time.Second),
 			ReadTimeout:        Duration(60 * time.Second),
 			WriteTimeout:       Duration(0), // streaming responses and websockets own their deadlines
@@ -391,6 +439,7 @@ func Default() Config {
 			ShutdownTimeout:    Duration(20 * time.Second),
 			MaxPromptBytes:     256 << 10,
 			MaxConcurrentTurns: 4,
+			MaxImageBytes:      0,
 		},
 		DesktopUI: DesktopUI{
 			Enabled:  false,
@@ -699,6 +748,22 @@ func (c Config) Validate() error {
 	if c.Session.ApprovalTimeout <= 0 {
 		fail("session.approvalTimeout: must be positive")
 	}
+	if c.Session.ApprovalGrantTTL < 0 {
+		fail("session.approvalGrantTTL: must not be negative; use 0 to disable " +
+			"scoped grants, which leaves only allow-once and reject-once")
+	}
+	if c.Session.ApprovalGrantTTL > 0 && c.Session.ApprovalGrantTTL.Std() < c.Session.ApprovalTimeout.Std() {
+		// A grant shorter than one approval window would expire while the very
+		// request that created it was still open, which reads as the feature
+		// being broken rather than as a policy.
+		fail("session.approvalGrantTTL: %s is shorter than approvalTimeout %s, so a "+
+			"grant would expire before the prompt that created it was answered",
+			c.Session.ApprovalGrantTTL.Std(), c.Session.ApprovalTimeout.Std())
+	}
+	if c.Session.PromptQueueDepth < 0 {
+		fail("session.promptQueueDepth: must not be negative; use 0 to refuse a " +
+			"prompt that arrives while a turn is running")
+	}
 	if c.Session.EventBuffer < 16 {
 		fail("session.eventBuffer: must be at least 16, got %d", c.Session.EventBuffer)
 	}
@@ -712,6 +777,17 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.MaxPromptBytes <= 0 || int64(c.Limits.MaxPromptBytes) > c.Limits.MaxBodyBytes {
 		fail("limits.maxPromptBytes: must be positive and <= maxBodyBytes")
+	}
+	if c.Limits.MaxImageBytes < 0 {
+		fail("limits.maxImageBytes: must not be negative; use 0 for no bound " +
+			"tighter than maxBodyBytes")
+	}
+	if c.Limits.MaxImageBytes > 0 && int64(c.Limits.MaxImageBytes) > c.Limits.MaxBodyBytes {
+		// The body limit is enforced before any handler reads, so a per-image cap
+		// above it could never bind. Saying so beats an operator who sets it and
+		// concludes the setting does nothing.
+		fail("limits.maxImageBytes: %d is above maxBodyBytes (%d), so it could never "+
+			"take effect; lower it or use 0", c.Limits.MaxImageBytes, c.Limits.MaxBodyBytes)
 	}
 	if c.Limits.MaxConcurrentTurns <= 0 {
 		fail("limits.maxConcurrentTurns: must be positive")

@@ -98,6 +98,14 @@ type Item struct {
 	IsError bool   `json:"isError,omitempty"`
 	// Pending is true for a tool call whose result has not been recorded.
 	Pending bool `json:"pending,omitempty"`
+
+	// Attachments is how many non-text blocks the message carried — a
+	// screenshot, a pasted image. The image itself is deliberately not
+	// projected: a transcript that carried every image anyone ever attached
+	// would be tens of megabytes for a phone to scroll, and the log remains the
+	// place to look one up in full. What matters for reading history is that a
+	// prompt was not only its words.
+	Attachments int `json:"attachments,omitempty"`
 }
 
 // Usage is token accounting for one assistant message.

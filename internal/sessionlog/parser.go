@@ -253,6 +253,21 @@ type contentBlock struct {
 	Text string `json:"text"`
 }
 
+// attachments counts the non-text blocks in a content array.
+//
+// It counts rather than carries: see Item.Attachments. Any unrecognised type is
+// counted too, because from a reader's point of view "something was attached
+// that is not words" is the fact worth showing, whatever the harness called it.
+func attachments(blocks []contentBlock) int {
+	n := 0
+	for _, b := range blocks {
+		if b.Type != "" && b.Type != "text" && b.Type != "reasoning" {
+			n++
+		}
+	}
+	return n
+}
+
 func (p *parser) feedUserMessage(line []byte, env envelope) {
 	var ev struct {
 		Data struct {
@@ -283,25 +298,45 @@ func (p *parser) feedUserMessage(line []byte, env envelope) {
 	}
 
 	text := joinText(ev.Data.Content)
-	if strings.TrimSpace(text) == "" {
-		// An image-only prompt, or an injection with no text body. Rendering an
-		// empty bubble would be noise.
+	files := attachments(ev.Data.Content)
+	if strings.TrimSpace(text) == "" && files == 0 {
+		// An injection with no body at all. Rendering an empty bubble would be
+		// noise.
 		return
 	}
 	if p.meta.Preview == "" {
-		p.meta.Preview = preview(text)
+		// A prompt that was only a screenshot still needs a list row, and "2
+		// attachments" is a truer one than a blank title.
+		if strings.TrimSpace(text) == "" {
+			p.meta.Preview = attachmentLabel(files)
+		} else {
+			p.meta.Preview = preview(text)
+		}
 	}
 	id := ev.Data.ID
 	if id == "" {
 		id = fmt.Sprintf("u-%d", env.Seq)
 	}
 	p.append(Item{
-		ID:   id,
-		Seq:  env.Seq,
-		Time: fromMillis(env.Time),
-		Role: RoleUser,
-		Text: text,
+		ID:          id,
+		Seq:         env.Seq,
+		Time:        fromMillis(env.Time),
+		Role:        RoleUser,
+		Text:        text,
+		Attachments: files,
 	})
+}
+
+// attachmentLabel is how a message made only of attachments is named, for a list
+// row that has no words to show. The app renders its own wording from
+// Item.Attachments when it has one; this is the fallback, and it lives here so
+// that a session whose first prompt was a screenshot is recognisable in every
+// client rather than only the one that was updated.
+func attachmentLabel(n int) string {
+	if n == 1 {
+		return "Image"
+	}
+	return fmt.Sprintf("%d images", n)
 }
 
 func (p *parser) feedAssistantMessage(line []byte, env envelope) {

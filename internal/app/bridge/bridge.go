@@ -123,9 +123,9 @@ func (b *Bridge) publishTool(u harness.Update) {
 
 // PublishState implements harness.StateSink.
 func (b *Bridge) PublishState(state harness.State, detail string) {
-	b.bus.Publish(events.TypeHarnessState, "", map[string]any{
-		"state":  string(state),
-		"detail": detail,
+	b.bus.Publish(events.TypeHarnessState, "", events.HarnessState{
+		State:  string(state),
+		Detail: detail,
 	})
 }
 

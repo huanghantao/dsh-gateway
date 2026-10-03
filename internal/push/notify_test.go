@@ -19,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 	"github.com/huanghantao/dsh-gateway/internal/push"
 )
@@ -198,16 +200,16 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 	<-notifier.Ready()
 
 	// A short turn is not worth an interruption.
-	bus.Publish(events.TypeTurnState, "session-quick", map[string]any{"state": "running"})
-	bus.Publish(events.TypeTurnState, "session-quick", map[string]any{"state": "completed"})
+	bus.Publish(events.TypeTurnState, "session-quick", events.TurnState{State: "running"})
+	bus.Publish(events.TypeTurnState, "session-quick", events.TurnState{State: "completed"})
 	waitFor(t, func() bool { return len(rec.received()) == 0 }, "nothing for a quick turn")
 
 	// A long one is.
 	reads := clock.Reads()
-	bus.Publish(events.TypeTurnState, "session-long", map[string]any{"state": "running"})
+	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{State: "running"})
 	waitFor(t, func() bool { return clock.Reads() > reads }, "the notifier to note the turn's start")
 	clock.Advance(5 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-long", map[string]any{"state": "completed"})
+	bus.Publish(events.TypeTurnState, "session-long", events.TurnState{State: "completed"})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for a long turn")
 	first := rec.received()[0]
@@ -226,7 +228,13 @@ func TestNotifierPushesWhatCannotWait(t *testing.T) {
 	}
 
 	// An approval interrupts immediately, and urgently.
-	bus.Publish(events.TypeApprovalRequested, "session-long", map[string]any{"id": "apr_1", "tool": "bash"})
+	//
+	// It is driven through the real broker rather than by hand-publishing a
+	// payload. That distinction is the whole point: this test used to publish a
+	// map while the broker published a struct, so it passed for as long as the
+	// notification it was checking silently said nothing. Going through the
+	// broker means the assertion is on what production actually emits.
+	requestApproval(t, bus, "session-long", "apr_1", "bash")
 	waitFor(t, func() bool { return len(rec.received()) >= 2 }, "a notification for the approval")
 	approval := rec.received()[1]
 	if approval.Title == "" || !strings.Contains(approval.Body, "bash") {
@@ -271,7 +279,7 @@ func TestNotificationNamesSessionOnlyWhenAsked(t *testing.T) {
 			name:    "off, and a failure is still distinguishable",
 			include: false,
 			state:   "failed",
-			want:    "The turn failed.",
+			want:    "Open the session for the error.",
 			absent:  title,
 		},
 		{
@@ -338,10 +346,10 @@ func longTurnBody(t *testing.T, includeName bool, state, title string) string {
 	<-notifier.Ready()
 
 	reads := clock.Reads()
-	bus.Publish(events.TypeTurnState, "session-1", map[string]any{"state": "running"})
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: "running"})
 	waitFor(t, func() bool { return clock.Reads() > reads }, "the notifier to note the turn's start")
 	clock.Advance(5 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-1", map[string]any{"state": state})
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{State: state})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for a long turn")
 	return rec.received()[0].Body
@@ -380,9 +388,34 @@ func busFor(t *testing.T) *events.Bus {
 	return events.New(events.Config{Replay: 64, Queue: 64})
 }
 
-// eventsApproval is the event type an approval arrives as.
-func eventsApproval() events.Type { return events.TypeApprovalRequested }
+// requestApproval drives the real broker, so the event the notifier sees is the
+// one production publishes.
+//
+// The broker blocks until a human answers, which is what the goroutine is for:
+// the test only cares about the notification it raises on the way in.
+func requestApproval(t *testing.T, bus *events.Bus, sessionID, id, tool string) {
+	t.Helper()
+	broker := approvals.New(approvals.Options{Timeout: time.Minute, Bus: bus, Logger: logx.Discard(), Now: time.Now})
+	t.Cleanup(broker.Close)
 
+	go func() {
+		_, _ = broker.RequestPermission(context.Background(), harness.PermissionRequest{
+			ID:          id,
+			SessionID:   sessionID,
+			ToolCallID:  "call_1",
+			Tool:        tool,
+			Input:       `{"command":"ls"}`,
+			RequestedAt: time.Now(),
+			ExpiresAt:   time.Now().Add(time.Minute),
+			Options: []harness.PermissionOption{
+				{ID: harness.OptionAllowOnce, Name: "Allow once", Kind: "allow_once"},
+				{ID: harness.OptionRejectOnce, Name: "Reject", Kind: "reject_once"},
+			},
+		})
+	}()
+}
+
+// waitFor polls until condition holds.
 func waitFor(t *testing.T, condition func() bool, what string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

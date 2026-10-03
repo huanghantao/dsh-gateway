@@ -16,6 +16,14 @@ type Match struct {
 	Seq       int64  `json:"seq,omitempty"`
 	Role      string `json:"role,omitempty"`
 	Tool      string `json:"tool,omitempty"`
+	// Field names which part of the row matched: "text", "tool", "input" or
+	// "output".
+	//
+	// It exists because those four mean different things to a reader. A hit in
+	// "output" is the answer to "which session printed this stack trace", and a
+	// result list that did not distinguish it from something the operator typed
+	// would send them looking in the wrong place.
+	Field string `json:"field,omitempty"`
 	// Snippet is the text around the match, trimmed to something readable on a
 	// phone. It is what makes a result recognisable: a list of session titles
 	// says where a phrase might be, not where it is.
@@ -108,9 +116,8 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOptions) (m
 			if found >= opts.PerSession || len(matches) >= opts.Matches {
 				break
 			}
-			text := itemText(item)
-			index := strings.Index(strings.ToLower(text), needle)
-			if index < 0 {
+			hit, ok := matchItem(item, needle)
+			if !ok {
 				continue
 			}
 			found++
@@ -121,7 +128,8 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOptions) (m
 				Seq:       item.Seq,
 				Role:      string(item.Role),
 				Tool:      item.Tool,
-				Snippet:   snippet(text, index, len(needle)),
+				Field:     hit.field,
+				Snippet:   snippet(hit.text, hit.index, len(needle)),
 				Time:      item.Time,
 			})
 		}
@@ -138,21 +146,41 @@ func (s *Store) modTime(path string) time.Time {
 	return info.ModTime()
 }
 
-// itemText is everything about an item worth searching: what was said, and what
-// was run. A tool call is included deliberately — "which session did I run that
-// command in" is the same question as "where did I mention it".
-func itemText(item Item) string {
-	parts := make([]string, 0, 4)
-	if item.Text != "" {
-		parts = append(parts, item.Text)
+// hit is where a query was found inside one item.
+type hit struct {
+	field string
+	text  string
+	index int
+}
+
+// matchItem looks for needle in the parts of an item worth searching, in the
+// order a reader would look: what was said, what was run, what it printed.
+//
+// Tool output is included deliberately. "Which session printed that stack trace"
+// is the question a coding agent's history is most often asked, and it is only
+// answerable from the output — the call that produced it says nothing about what
+// came back. Searching the concatenation instead would report the right row with
+// a snippet taken from the wrong field, which is why each part is tried on its
+// own.
+func matchItem(item Item, needle string) (hit, bool) {
+	fields := [...]struct {
+		name string
+		text string
+	}{
+		{"text", item.Text},
+		{"tool", item.Tool},
+		{"input", item.Input},
+		{"output", item.Output},
 	}
-	if item.Tool != "" {
-		parts = append(parts, item.Tool)
+	for _, f := range fields {
+		if f.text == "" {
+			continue
+		}
+		if index := strings.Index(strings.ToLower(f.text), needle); index >= 0 {
+			return hit{field: f.name, text: f.text, index: index}, true
+		}
 	}
-	if item.Input != "" {
-		parts = append(parts, item.Input)
-	}
-	return strings.Join(parts, "\n")
+	return hit{}, false
 }
 
 // snippetWidth is how much text a result shows around the match.

@@ -183,7 +183,7 @@ func TestNotifierReachesChatChannels(t *testing.T) {
 	})
 	<-notifier.Ready()
 
-	bus.Publish(eventsApproval(), "session-9", map[string]any{"id": "apr_9", "tool": "rm -rf build"})
+	requestApproval(t, bus, "session-9", "apr_9", "rm -rf build")
 	waitFor(t, func() bool { return chat.last() != nil }, "a card in the chat")
 
 	if card := chat.last(); card != nil {

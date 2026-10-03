@@ -17,6 +17,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/bridge"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
 	"github.com/huanghantao/dsh-gateway/internal/authn/ratelimit"
@@ -32,6 +33,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/push"
 	"github.com/huanghantao/dsh-gateway/internal/sessionlog"
 	"github.com/huanghantao/dsh-gateway/internal/sessionwatch"
+	"github.com/huanghantao/dsh-gateway/internal/workspace"
 	"github.com/huanghantao/dsh-gateway/web"
 )
 
@@ -239,7 +241,13 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 	// publishes into it.
 	updates := bridge.New(bus)
 
-	approvalsBroker := approvals.New(cfg.Session.ApprovalTimeout.Std(), bus, logger, time.Now)
+	approvalsBroker := approvals.New(approvals.Options{
+		Timeout:  cfg.Session.ApprovalTimeout.Std(),
+		GrantTTL: cfg.Session.ApprovalGrantTTL.Std(),
+		Bus:      bus,
+		Logger:   logger,
+		Now:      time.Now,
+	})
 	defer approvalsBroker.Close()
 
 	adapter, err := acp.New(acp.Options{
@@ -264,19 +272,52 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 
 	var harnessDriver harness.Harness = adapter
 
+	// The scheduler is built before the lease because the lease asks it whether
+	// a session is mid-turn. The dependency runs one way: the scheduler knows
+	// nothing about leases, so there is a single call direction and a single
+	// lock order to reason about.
+	scheduler := turns.New(turns.Options{
+		Harness:       harnessDriver,
+		Bus:           bus,
+		Logger:        logger,
+		Timeout:       cfg.Session.PromptTimeout.Std(),
+		QueueDepth:    cfg.Session.PromptQueueDepth,
+		MaxConcurrent: cfg.Limits.MaxConcurrentTurns,
+	})
+
 	leases := lease.New(lease.Options{
 		Harness:     harnessDriver,
 		IdleTimeout: cfg.Session.IdleTimeout.Std(),
 		Logger:      logger,
+		Busy:        scheduler.Busy,
 		OnAcquire: func(info harness.SessionInfo) {
 			bus.Publish(events.TypeSessionState, info.ID, map[string]any{"leased": true})
 		},
 		OnRelease: func(sessionID, reason string) {
+			// A grant names a session, so a session the gateway has let go takes
+			// its authorisations with it. Leaving them would mean a rule agreed
+			// to for work that is finished quietly applying to whatever runs in
+			// that session next.
+			approvalsBroker.RevokeSessionGrants(sessionID)
 			bus.Publish(events.TypeSessionState, sessionID, map[string]any{
 				"leased": false, "reason": reason,
 			})
 		},
 	})
+
+	// --- undo ---------------------------------------------------------------
+	//
+	// The only component in the gateway that writes to an operator's files, and
+	// it is constructed only when the operator asked for it. A deployment that
+	// leaves changes.revert off has no reverter at all, so the write path is
+	// absent rather than disabled — a stronger property, and a simpler one to
+	// check.
+	var reverter *workspace.Reverter
+	if cfg.Changes.Revert.Enabled {
+		reverter = workspace.New(workspace.Options{Roots: cfg.Workspaces, Logger: logger})
+		logger.Warn("changes.revert is enabled: this gateway may write to files " +
+			"inside the configured workspaces when an operator asks it to undo a session's edits")
+	}
 
 	// --- history ------------------------------------------------------------
 
@@ -436,8 +477,10 @@ func serve(ctx context.Context, cfg config.Config, logger *logx.Logger) error {
 		Bus:           bus,
 		Leases:        leases,
 		Approvals:     approvalsBroker,
+		Turns:         scheduler,
 		Harness:       harnessDriver,
 		Sessions:      history,
+		Workspace:     reverter,
 		Trash:         trash,
 		Curation:      curationStore,
 		CurationRules: curationRules,

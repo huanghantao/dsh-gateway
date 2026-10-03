@@ -19,6 +19,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
+	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
 	"github.com/huanghantao/dsh-gateway/internal/authn/ratelimit"
@@ -47,6 +48,22 @@ type fakeHarness struct {
 	// a test can only assert that a session was created, not which model it was
 	// told to use — and that is the whole question.
 	setCalls []setConfigCall
+	// promptGate, when non-nil, holds Prompt open until a value is sent. A turn
+	// that settles instantly cannot show a queue, which is most of what the
+	// prompt endpoints are for.
+	promptGate chan struct{}
+	// prompts records every prompt that reached the harness, in order.
+	prompts []promptCall
+	// imagesAllowed is what Capabilities reports.
+	imagesAllowed bool
+	// cancels records every Cancel.
+	cancels []string
+}
+
+// promptCall is one harness.Prompt invocation.
+type promptCall struct {
+	sessionID string
+	blocks    []harness.PromptBlock
 }
 
 // setConfigCall is one harness.SetConfigOption invocation.
@@ -59,7 +76,10 @@ func (f *fakeHarness) Start(context.Context) error { return nil }
 func (f *fakeHarness) Close(context.Context) error { return nil }
 func (f *fakeHarness) State() harness.State        { return f.state }
 func (f *fakeHarness) Capabilities() harness.Capabilities {
-	return harness.Capabilities{ProtocolVersion: 1, CanList: true, CanResume: true, CanClose: true}
+	return harness.Capabilities{
+		ProtocolVersion: 1, CanList: true, CanResume: true, CanClose: true,
+		CanPromptImages: f.imagesAllowed,
+	}
 }
 
 func (f *fakeHarness) ListSessions(context.Context, string, string) (harness.SessionPage, error) {
@@ -88,11 +108,22 @@ func (f *fakeHarness) SetConfigOption(_ context.Context, _, option, value string
 	return f.config, nil
 }
 
-func (f *fakeHarness) Prompt(context.Context, string, []harness.PromptBlock) (string, error) {
+func (f *fakeHarness) Prompt(ctx context.Context, sessionID string, blocks []harness.PromptBlock) (string, error) {
+	f.prompts = append(f.prompts, promptCall{sessionID: sessionID, blocks: blocks})
+	if f.promptGate != nil {
+		select {
+		case <-f.promptGate:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	return "end_turn", nil
 }
 
-func (f *fakeHarness) Cancel(context.Context, string) error { return nil }
+func (f *fakeHarness) Cancel(_ context.Context, sessionID string) error {
+	f.cancels = append(f.cancels, sessionID)
+	return nil
+}
 
 // testServer bundles the API with the pieces a test needs to drive it.
 type testServer struct {
@@ -109,6 +140,9 @@ type testServer struct {
 	pair    *pairing.Service
 	token   string // a credential for an enrolled device
 	logger  *logx.Logger
+	// driver is the fake harness behind the API, so a test can hold a turn open
+	// or inspect what reached the agent.
+	driver *fakeHarness
 	// stateDir is where the gateway keeps devices, the audit log and the pairing
 	// secret, so a test can read back what the gateway wrote down about a
 	// request rather than only what it answered.
@@ -186,8 +220,21 @@ func newTestServer(t *testing.T) *testServer {
 		}},
 	}
 
-	leases := lease.New(lease.Options{Harness: driver, IdleTimeout: time.Minute, Logger: logger, Now: now})
-	broker := approvals.New(time.Minute, bus, logger, now)
+	// The scheduler is built before the lease, which consults it: "is a turn
+	// running" has exactly one answer, and this is where it lives.
+	scheduler := turns.New(turns.Options{
+		Harness:    driver,
+		Bus:        bus,
+		Logger:     logger,
+		Timeout:    time.Minute,
+		QueueDepth: cfg.Session.PromptQueueDepth,
+		Now:        now,
+	})
+
+	leases := lease.New(lease.Options{
+		Harness: driver, IdleTimeout: time.Minute, Logger: logger, Now: now, Busy: scheduler.Busy,
+	})
+	broker := approvals.New(approvals.Options{Timeout: time.Minute, Bus: bus, Logger: logger, Now: now})
 	t.Cleanup(broker.Close)
 
 	srv, err := New(Deps{
@@ -196,6 +243,7 @@ func newTestServer(t *testing.T) *testServer {
 		Bus:       bus,
 		Leases:    leases,
 		Approvals: broker,
+		Turns:     scheduler,
 		Harness:   driver,
 		// The store is real so deletion has files to move; the projector's own
 		// behaviour is covered in its own package.
@@ -232,6 +280,7 @@ func newTestServer(t *testing.T) *testServer {
 		pair:     pairSvc,
 		token:    token,
 		logger:   logger,
+		driver:   driver,
 		stateDir: dir,
 	}
 }

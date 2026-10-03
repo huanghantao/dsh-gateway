@@ -2,6 +2,7 @@ package v1
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,13 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/curation"
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/httpcore"
-	"github.com/huanghantao/dsh-gateway/internal/idgen"
 	"github.com/huanghantao/dsh-gateway/internal/sessionlog"
 )
 
@@ -48,6 +48,14 @@ type sessionView struct {
 	// HistoryAvailable is false when no readable log exists, so the UI can hide
 	// the "load earlier" affordance instead of showing a spinner forever.
 	HistoryAvailable bool `json:"historyAvailable"`
+	// Turn is the prompt running in this session right now, when this gateway is
+	// the one running it. It carries the start time, which is what a client that
+	// reconnects mid-turn needs: the turn.state event that announced it may be
+	// long past the replay window.
+	Turn *turns.Ticket `json:"turn,omitempty"`
+	// Queue are the prompts waiting behind Turn, oldest first. Each carries its
+	// position, so a client can show a follow-up creeping forward.
+	Queue []turns.Ticket `json:"queue,omitempty"`
 }
 
 // sessionPage is a page of sessions.
@@ -228,6 +236,15 @@ func (s *Server) viewSession(ctx context.Context, info harness.SessionInfo) sess
 		v.Leased = true
 		v.Busy = snap.Busy
 		applyConfig(&v, snap.Config)
+	}
+
+	// The queue is read for every session, leased or not: the scheduler holds
+	// state only while something is running or waiting, so this is a map lookup
+	// on the common path rather than a per-row cost.
+	if s.deps.Turns != nil {
+		queue := s.deps.Turns.Queue(info.ID)
+		v.Turn = queue.Running
+		v.Queue = queue.Queued
 	}
 
 	if s.deps.Curation != nil {
@@ -562,22 +579,29 @@ type promptRequest struct {
 	Blocks []promptBlock `json:"blocks"`
 }
 
+// promptBlock is one element of a prompt.
+//
+// Text and image are the two the harness understands. Data is base64 because
+// that is what a JSON body can carry, and it is bounded by limits.maxImageBytes
+// after decoding — a limit on the encoded form would be a limit that means a
+// different thing for every image size.
 type promptBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
-// promptResponse acknowledges a prompt. The turn's progress arrives on the event
-// stream, because a turn can outlive any sensible HTTP response.
-type promptResponse struct {
-	TurnID string `json:"turnId"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Data     string `json:"data,omitempty"`
 }
 
 // handlePrompt admits a prompt and returns immediately.
 //
-// The turn itself runs on a detached context. Tying it to the request would mean
-// a phone that locks its screen cancels the agent mid-edit, which is precisely
-// the behaviour a remote-control client must not have.
+// The turn itself is owned by the scheduler, which runs it on a detached
+// context: tying it to the request would mean a phone that locks its screen
+// cancels the agent mid-edit, which is precisely the behaviour a remote-control
+// client must not have.
+//
+// A prompt that arrives while a turn is running is queued rather than refused,
+// so a follow-up typed while watching the agent work is kept. The response says
+// which of the two happened.
 func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -607,77 +631,75 @@ func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.deps.Leases.IsBusy(id) {
-		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()),
-			errx.New(errx.KindConflict, "prompt_in_flight",
-				"a turn is already running for this session; wait for it or cancel it"))
-		return
-	}
-
-	turnID := idgen.New("turn")
-	principal, _ := principalFrom(r.Context())
-
-	s.deps.Leases.SetBusy(id, true)
-	s.deps.Bus.Publish(events.TypeTurnState, id, map[string]any{
-		"turnId": turnID, "state": "running",
-	})
-	s.deps.Audit.Record(r.Context(), audit.EventPromptSent, id, map[string]any{
-		"deviceId": principal.DeviceID,
-		"turnId":   turnID,
-		"blocks":   len(blocks),
-	})
-
-	// Detached on purpose: a turn can run for many minutes and must survive the
-	// phone locking its screen or losing its radio. runTurn gives itself its own
-	// bounded context. Inheriting the request's would cancel the agent mid-edit
-	// the moment the client walked away.
-	go s.runTurn(id, turnID, blocks) //nolint:gosec,contextcheck // the request context must not outlive the request
-
-	_ = httpcore.RespondJSON(w, http.StatusAccepted, promptResponse{TurnID: turnID})
-}
-
-// runTurn executes one turn and reports its outcome on the event stream.
-func (s *Server) runTurn(sessionID, turnID string, blocks []harness.PromptBlock) {
-	// Detached from any request, then bounded by the configured prompt timeout so
-	// that a wedged harness cannot pin a lease forever.
-	ctx, cancel := context.WithTimeout(context.Background(), s.deps.Config.Session.PromptTimeout.Std())
-	defer cancel()
-
-	stopReason, err := s.deps.Harness.Prompt(ctx, sessionID, blocks)
-
-	s.deps.Leases.SetBusy(sessionID, false)
-	s.deps.Leases.Touch(sessionID)
-
-	state := "completed"
-	detail := ""
+	ticket, err := s.deps.Turns.Submit(r.Context(), id, blocks)
 	if err != nil {
-		state = "failed"
-		detail = err.Error()
-	} else if stopReason == "cancelled" {
-		state = "cancelled"
-	}
-
-	s.deps.Bus.Publish(events.TypeTurnState, sessionID, map[string]any{
-		"turnId": turnID, "state": state, "stopReason": stopReason, "detail": detail,
-	})
-	if err != nil {
-		s.deps.Logger.Warn("turn failed", "session", sessionID, "turn", turnID, "error", err.Error())
-	}
-}
-
-// handleCancel interrupts the in-flight turn.
-func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-
-	if err := s.deps.Harness.Cancel(r.Context(), id); err != nil {
 		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()), err)
 		return
 	}
+
+	principal, _ := principalFrom(r.Context())
+	s.deps.Audit.Record(r.Context(), audit.EventPromptSent, id, map[string]any{
+		"deviceId": principal.DeviceID,
+		"turnId":   ticket.ID,
+		"state":    ticket.State,
+		"blocks":   len(blocks),
+	})
+
+	_ = httpcore.RespondJSON(w, http.StatusAccepted, ticket)
+}
+
+// handleCancel interrupts the in-flight turn and discards anything queued
+// behind it.
+//
+// The answer reports what was actually stopped. Cancelling a session with
+// nothing running is a no-op, not an error: a double tap on a phone must be
+// harmless, and the agent must not be told to stop a turn that belongs to
+// another process.
+func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	result, err := s.deps.Turns.Cancel(r.Context(), id)
+	if err != nil {
+		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()), err)
+		return
+	}
+
 	principal, _ := principalFrom(r.Context())
 	s.deps.Audit.Record(r.Context(), audit.EventPromptCancelled, id, map[string]any{
 		"deviceId": principal.DeviceID,
+		"turn":     result.Cancelled,
+		"dropped":  result.Dropped,
 	})
-	w.WriteHeader(http.StatusAccepted)
+	_ = httpcore.RespondJSON(w, http.StatusOK, result)
+}
+
+// handleDropQueued removes one prompt waiting behind a running turn.
+//
+// It is separate from cancel on purpose: dropping a follow-up the operator no
+// longer wants must not stop the work already in progress.
+func (s *Server) handleDropQueued(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	turnID := r.PathValue("turnId")
+
+	dropped, err := s.deps.Turns.Drop(id, turnID)
+	if err != nil {
+		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()), err)
+		return
+	}
+	if !dropped {
+		httpcore.WriteError(w, r, s.deps.Logger, httpcore.RequestIDFrom(r.Context()),
+			errx.New(errx.KindNotFound, "no_such_turn",
+				"that prompt is not queued; it may have started or been dropped already"))
+		return
+	}
+
+	principal, _ := principalFrom(r.Context())
+	s.deps.Audit.Record(r.Context(), audit.EventPromptCancelled, id, map[string]any{
+		"deviceId": principal.DeviceID,
+		"turnId":   turnID,
+		"dropped":  1,
+	})
+	_ = httpcore.RespondJSON(w, http.StatusOK, s.deps.Turns.Queue(id))
 }
 
 // handleModels returns the cached model catalog, plus the gateway's own defaults.
@@ -954,28 +976,121 @@ func (s *Server) applyPreferredOptions(ctx context.Context, sessionID, model, ef
 	return nil
 }
 
+// acceptedImageTypes are the formats a prompt may carry.
+//
+// A closed set rather than `image/*`: naming them is what lets a format the
+// model cannot read be refused *before* the turn starts, where the answer is a
+// 400 the app can explain, rather than after, where it is a failed turn the
+// operator has to interpret. HEIC is absent on purpose — it is what an iPhone
+// gallery produces, and the app converts it before sending.
+var acceptedImageTypes = map[string]bool{
+	"image/png":  true,
+	"image/jpeg": true,
+	"image/webp": true,
+	"image/gif":  true,
+}
+
 // toHarnessBlocks validates and converts prompt blocks.
+//
+// The rules are the ones the ACP adapter applies, checked one layer earlier: a
+// prompt the harness cannot carry is answered with a 400 the app can explain,
+// instead of being admitted as a turn that fails a moment later for a reason the
+// operator never sees.
 func (s *Server) toHarnessBlocks(in []promptBlock) ([]harness.PromptBlock, error) {
 	if len(in) == 0 {
 		return nil, errx.New(errx.KindInvalid, "empty_prompt", "a prompt must contain at least one block")
 	}
 	out := make([]harness.PromptBlock, 0, len(in))
-	total := 0
+	textBytes := 0
+	meaningful := 0
 	for _, b := range in {
 		switch b.Type {
 		case "", "text":
-			total += len(b.Text)
-			if total > s.deps.Config.Limits.MaxPromptBytes {
+			textBytes += len(b.Text)
+			if textBytes > s.deps.Config.Limits.MaxPromptBytes {
 				return nil, errx.New(errx.KindInvalid, "prompt_too_large",
 					"the prompt exceeds the configured size limit")
 			}
+			// A blank text block beside an image is normal — the composer sends
+			// its caption even when there is none — so it is carried and dropped
+			// later rather than refused here.
+			if strings.TrimSpace(b.Text) != "" {
+				meaningful++
+			}
 			out = append(out, harness.PromptBlock{Type: "text", Text: b.Text})
+
+		case "image":
+			block, err := s.imageBlock(b)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, block)
+			meaningful++
+
 		default:
-			// Image prompts arrive in a later revision. Rejecting explicitly beats
-			// silently dropping an attachment the operator believes was sent.
 			return nil, errx.New(errx.KindInvalid, "unsupported_block",
-				"prompt block type "+b.Type+" is not supported yet")
+				"prompt block type "+b.Type+" is not supported")
 		}
 	}
+	if meaningful == 0 {
+		return nil, errx.New(errx.KindInvalid, "empty_prompt",
+			"a prompt must contain at least one non-empty block")
+	}
 	return out, nil
+}
+
+// imageBlock validates one image block and decodes it.
+func (s *Server) imageBlock(b promptBlock) (harness.PromptBlock, error) {
+	if !s.deps.Harness.Capabilities().CanPromptImages {
+		// Fail closed, with an explanation: the alternative is a prompt the model
+		// silently never sees.
+		return harness.PromptBlock{}, errx.New(errx.KindInvalid, "images_unsupported",
+			"the connected harness is not configured to accept images")
+	}
+
+	mime := strings.ToLower(strings.TrimSpace(b.MIMEType))
+	if !acceptedImageTypes[mime] {
+		return harness.PromptBlock{}, errx.New(errx.KindInvalid, "unsupported_image_type",
+			"an image must be png, jpeg, webp or gif")
+	}
+
+	data, err := decodeBase64(b.Data)
+	if err != nil {
+		return harness.PromptBlock{}, errx.New(errx.KindInvalid, "invalid_image_data",
+			"the image is not valid base64")
+	}
+	if len(data) == 0 {
+		return harness.PromptBlock{}, errx.New(errx.KindInvalid, "invalid_image_data",
+			"the image is empty")
+	}
+	if limit := s.imageLimit(); int64(len(data)) > limit {
+		return harness.PromptBlock{}, errx.New(errx.KindInvalid, "image_too_large",
+			fmt.Sprintf("the image is %d bytes; the limit is %d", len(data), limit))
+	}
+	return harness.PromptBlock{Type: "image", MIMEType: mime, Data: data}, nil
+}
+
+// imageLimit is the per-image bound: the configured one, or the request body
+// limit when none is set. The body limit is enforced before a handler runs, so
+// it is a real ceiling either way.
+func (s *Server) imageLimit() int64 {
+	if n := s.deps.Config.Limits.MaxImageBytes; n > 0 {
+		return int64(n)
+	}
+	return s.deps.Config.Limits.MaxBodyBytes
+}
+
+// decodeBase64 accepts padded and unpadded standard base64 alike.
+//
+// Browsers emit padding, and a client that trims it is making a reasonable guess
+// about a format that does not need it. Refusing that would be a compatibility
+// bug with no security value.
+func decodeBase64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, errors.New("empty base64")
+	}
+	if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return data, nil
+	}
+	return base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
 }

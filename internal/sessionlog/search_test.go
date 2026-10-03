@@ -46,6 +46,64 @@ func TestSearchFindsTextInsideSessions(t *testing.T) {
 	}
 }
 
+// TestSearchFindsToolOutputAndNamesTheField covers the question a coding
+// agent's history is most often asked: "which session printed that?" The answer
+// is only in the output, and the result has to say so — a hit that looked like
+// something the operator typed would send them looking in the wrong place.
+func TestSearchFindsToolOutputAndNamesTheField(t *testing.T) {
+	root := t.TempDir()
+	writeLog(t, root, "--ws--", "session-build", []string{
+		`{"type":"session","version":4,"id":"session-build","cwd":"/Users/me/code/api"}`,
+		`{"type":"user/message","seq":1,"time":1790519693050,"data":{"content":[{"type":"text","text":"run the tests"}],"id":"u1","source":{"kind":"user"}}}`,
+		`{"type":"tool/call","seq":2,"time":1790519693060,"data":{"callId":"c1","name":"bash","arguments":"{\"command\":\"go test ./...\"}"}}`,
+		`{"type":"tool/result","seq":3,"time":1790519693070,"data":{"message":{"toolCallId":"c1","isError":true,"content":[{"type":"text","text":"panic: nil map write in internal/cache/store.go:41"}]}}}`,
+	})
+	store := newTestStore(t, root)
+
+	matches, _, err := store.Search(context.Background(), "nil map write", DefaultSearchOptions())
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("matches = %+v, want the session whose tool printed it", matches)
+	}
+	match := matches[0]
+	if match.Field != "output" {
+		t.Errorf("field = %q, want output", match.Field)
+	}
+	if match.Tool != "bash" {
+		t.Errorf("tool = %q, want the command that produced it", match.Tool)
+	}
+	if !strings.Contains(match.Snippet, "nil map write") {
+		t.Errorf("snippet = %q, want the text around the match, taken from the output", match.Snippet)
+	}
+}
+
+// TestSearchPrefersWhatWasSaidOverWhatWasPrinted pins the field order: a phrase
+// that appears both in a prompt and in some tool's output is reported as the
+// prompt, because that is where a reader expects to find their own words.
+func TestSearchPrefersWhatWasSaidOverWhatWasPrinted(t *testing.T) {
+	root := t.TempDir()
+	writeLog(t, root, "--ws--", "session-both", []string{
+		`{"type":"session","version":4,"id":"session-both","cwd":"/ws"}`,
+		`{"type":"user/message","seq":1,"time":1790519693050,"data":{"content":[{"type":"text","text":"why is the upload failing"}],"id":"u1","source":{"kind":"user"}}}`,
+		`{"type":"tool/call","seq":2,"time":1790519693060,"data":{"callId":"c1","name":"bash","arguments":"{\"command\":\"grep upload\"}"}}`,
+		`{"type":"tool/result","seq":3,"time":1790519693070,"data":{"message":{"toolCallId":"c1","content":[{"type":"text","text":"upload: connection reset"}]}}}`,
+	})
+	store := newTestStore(t, root)
+
+	matches, _, err := store.Search(context.Background(), "upload", DefaultSearchOptions())
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("no match for a phrase that appears twice")
+	}
+	if matches[0].Field != "text" {
+		t.Errorf("field = %q, want text: the operator's own words come first", matches[0].Field)
+	}
+}
+
 // TestSearchCutsSnippetsOnRunes: this product's text is mostly Chinese, and a
 // byte-wise cut would show broken characters that look like the session is
 // corrupted.

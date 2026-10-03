@@ -38,6 +38,19 @@ type Manager struct {
 	logger  *logx.Logger
 	now     func() time.Time
 
+	// busy answers "is a turn running in this session", and is injected at the
+	// composition root from the turn scheduler.
+	//
+	// It is a function rather than a flag this package sets because "mid-turn"
+	// must have exactly one definition. When the lease kept its own copy, the
+	// copy was written by a check-then-set in the prompt handler: two concurrent
+	// prompts could both be admitted, and the reaper could see a session as idle
+	// while a turn was in fact running.
+	//
+	// The scheduler never calls back into this package, so the call direction is
+	// one way and there is no lock to order against.
+	busy func(sessionID string) bool
+
 	// onAcquire and onRelease let the caller publish session.state events
 	// without this package depending on the event bus.
 	onAcquire func(info harness.SessionInfo)
@@ -51,7 +64,6 @@ type entry struct {
 	info     harness.SessionInfo
 	config   []harness.ConfigOption
 	lastUsed time.Time
-	busy     bool
 	// pinned keeps a lease alive beyond the idle window. It is set while a
 	// client explicitly asks to hold the session, for example while the desktop
 	// is known to be closed and the operator is working entirely from the phone.
@@ -64,6 +76,10 @@ type Options struct {
 	// IdleTimeout is how long an unused, unpinned, non-busy lease survives.
 	IdleTimeout time.Duration
 	Logger      *logx.Logger
+	// Busy reports whether a turn is running for a session. Nil means nothing
+	// ever is, which is the right default for a test that only exercises
+	// attaching and attaching again.
+	Busy func(sessionID string) bool
 	// OnAcquire and OnRelease are optional observers.
 	OnAcquire func(info harness.SessionInfo)
 	OnRelease func(sessionID string, reason string)
@@ -78,11 +94,15 @@ func New(opts Options) *Manager {
 	if opts.IdleTimeout <= 0 {
 		opts.IdleTimeout = 5 * time.Minute
 	}
+	if opts.Busy == nil {
+		opts.Busy = func(string) bool { return false }
+	}
 	return &Manager{
 		harness:   opts.Harness,
 		idle:      opts.IdleTimeout,
 		logger:    opts.Logger,
 		now:       opts.Now,
+		busy:      opts.Busy,
 		onAcquire: opts.OnAcquire,
 		onRelease: opts.OnRelease,
 		leases:    map[string]*entry{},
@@ -164,16 +184,6 @@ func (m *Manager) Touch(sessionID string) {
 	m.mu.Unlock()
 }
 
-// SetBusy pins or unpins a lease for the duration of a turn.
-func (m *Manager) SetBusy(sessionID string, busy bool) {
-	m.mu.Lock()
-	if e, ok := m.leases[sessionID]; ok {
-		e.busy = busy
-		e.lastUsed = m.now()
-	}
-	m.mu.Unlock()
-}
-
 // SetPinned keeps a lease alive indefinitely regardless of idle time.
 func (m *Manager) SetPinned(sessionID string, pinned bool) {
 	m.mu.Lock()
@@ -202,11 +212,16 @@ func (m *Manager) IsLeased(sessionID string) bool {
 }
 
 // IsBusy reports whether a turn is in flight for the session.
+//
+// A turn running in another process is the watcher's business, not the lease's:
+// this answers for sessions the gateway itself is driving.
 func (m *Manager) IsBusy(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e, ok := m.leases[sessionID]
-	return ok && e.busy
+	if _, held := m.leases[sessionID]; !held {
+		return false
+	}
+	return m.busy(sessionID)
 }
 
 // Get returns a lease snapshot.
@@ -219,7 +234,7 @@ func (m *Manager) Get(sessionID string) (Snapshot, bool) {
 	}
 	return Snapshot{
 		SessionID: sessionID,
-		Busy:      e.busy,
+		Busy:      m.busy(sessionID),
 		Pinned:    e.pinned,
 		LastUsed:  e.lastUsed,
 		Config:    e.config,
@@ -227,6 +242,12 @@ func (m *Manager) Get(sessionID string) (Snapshot, bool) {
 }
 
 // List returns every held lease.
+//
+// The lease mutex is held across the calls into the scheduler, which is
+// deliberate: the lock order is always lease-then-scheduler, and the scheduler
+// never calls back here, so there is exactly one order to reason about. The
+// alternative — releasing the lock and re-reading — trades that simplicity for a
+// critical section the scheduler does not need.
 func (m *Manager) List() []Snapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -234,7 +255,7 @@ func (m *Manager) List() []Snapshot {
 	for id, e := range m.leases {
 		out = append(out, Snapshot{
 			SessionID: id,
-			Busy:      e.busy,
+			Busy:      m.busy(id),
 			Pinned:    e.pinned,
 			LastUsed:  e.lastUsed,
 			Config:    e.config,
@@ -250,12 +271,14 @@ func (m *Manager) List() []Snapshot {
 // but the in-flight turn is abandoned as a result, so callers should warn first.
 func (m *Manager) Release(ctx context.Context, sessionID, reason string, force bool) error {
 	m.mu.Lock()
-	e, ok := m.leases[sessionID]
-	if !ok {
+	if _, ok := m.leases[sessionID]; !ok {
 		m.mu.Unlock()
 		return nil
 	}
-	if e.busy && !force {
+	// The busy check and the removal are one step under one lock: a turn that
+	// started between a separate check and this delete would have its session
+	// handed to the desktop mid-edit.
+	if !force && m.busy(sessionID) {
 		m.mu.Unlock()
 		return errx.New(errx.KindConflict, "session_busy",
 			"a turn is in flight; cancel it before releasing the session")
@@ -324,9 +347,11 @@ func (m *Manager) reap(ctx context.Context) {
 	m.mu.Lock()
 	var expired []string
 	for id, e := range m.leases {
-		// A busy or pinned lease is never reclaimed by the reaper. Busy means an
-		// agent is mid-turn; pinned means a human asked to keep it.
-		if e.busy || e.pinned {
+		// A pinned lease is never reclaimed by the reaper; a busy one is the
+		// scheduler's answer, and asking here — under this lock, in the same
+		// order as everywhere else — is what stops a turn being reaped out from
+		// under itself.
+		if e.pinned || m.busy(id) {
 			continue
 		}
 		if now.Sub(e.lastUsed) >= m.idle {
