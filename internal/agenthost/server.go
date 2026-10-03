@@ -227,17 +227,6 @@ func (s *Server) Adopt(conn *hostwire.Conn) uint64 {
 	return generation
 }
 
-// generationOf reports the generation of the given connection, or zero if it is
-// no longer the active one.
-func (s *Server) generationOf(conn *hostwire.Conn) uint64 {
-	s.connMu.Lock()
-	defer s.connMu.Unlock()
-	if s.conn != conn {
-		return 0
-	}
-	return s.generation
-}
-
 // current returns the active connection, or nil.
 func (s *Server) current() *hostwire.Conn {
 	s.connMu.Lock()
@@ -1067,32 +1056,6 @@ func (s *Server) RequestPermission(ctx context.Context, req harness.PermissionRe
 			DecidedBy: "shutdown",
 		}, nil
 	}
-}
-
-// serverContext is cancelled when the host stops and never before, which is the
-// lifetime every turn and permission wait is rooted in.
-func (s *Server) serverContext() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-s.stop:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
-}
-
-func (s *Server) pendingCount() int {
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	n := 0
-	for _, sess := range s.sessions {
-		sess.mu.Lock()
-		n += len(sess.pending)
-		sess.mu.Unlock()
-	}
-	return n
 }
 
 /* --------------------------------------------------------------------- turn */

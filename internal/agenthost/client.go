@@ -138,7 +138,10 @@ func (c *Client) Start(ctx context.Context) error {
 	c.mu.Lock()
 	c.started = true
 	c.mu.Unlock()
-	go c.supervise(conn)
+	// The supervisor outlives every request — it is what keeps the connection up
+	// for as long as this client lives — so it is rooted in the client's own
+	// lifetime rather than in the context that happened to start it.
+	go c.supervise(conn) //nolint:contextcheck,gosec // see above
 	return nil
 }
 
@@ -208,15 +211,16 @@ func (c *Client) connect(ctx context.Context) (*hostwire.Conn, error) {
 	// command of its own. The two are decoupled on purpose: the answer must not
 	// be tied to the connection the question arrived on, or a gateway that
 	// reconnected while a tool waited could never answer it.
-	conn.Handle(hostwire.MethodPermissionRequest, func(r *hostwire.Request) error {
+	conn.Handle(hostwire.MethodPermissionRequest, func(r *hostwire.Request) error { //nolint:contextcheck // the answer is bounded by the connection's own context, not by the request that carried the question
 		var req hostwire.PermissionRequest
 		if err := r.Decode(&req); err != nil {
 			return err
 		}
 		// On its own goroutine: `decide` blocks until a person answers, and the
-		// reader must not stop behind it.
+		// reader must not stop behind it. The connection's context bounds the
+		// wait, so a host that goes away does not leave a decision outstanding.
 		go func() {
-			decision, err := c.decide(context.Background(), req)
+			decision, err := c.decide(r.Context(), req)
 			if err != nil {
 				c.logger.Warn("an approval could not be decided",
 					"approval", req.ID, "session", req.SessionID, "error", err.Error())
@@ -229,7 +233,7 @@ func (c *Client) connect(ctx context.Context) (*hostwire.Conn, error) {
 					OptionID:  harness.OptionRejectOnce,
 				}
 			}
-			c.sendDecision(decision)
+			c.sendDecision(r.Context(), decision)
 		}()
 		return nil
 	})
@@ -416,6 +420,7 @@ func (c *Client) State() harness.State {
 	return c.state
 }
 
+// ListSessions asks the host for a page of the sessions it can see.
 func (c *Client) ListSessions(ctx context.Context, workspace, cursor string) (harness.SessionPage, error) {
 	var out hostwire.SessionPage
 	err := c.call(ctx, hostwire.MethodSessionList,
@@ -430,6 +435,7 @@ func (c *Client) ListSessions(ctx context.Context, workspace, cursor string) (ha
 	return page, nil
 }
 
+// NewSession creates a session in the given workspace.
 func (c *Client) NewSession(ctx context.Context, workspace string) (harness.Session, error) {
 	var out hostwire.Session
 	if err := c.call(ctx, hostwire.MethodSessionNew,
@@ -439,6 +445,9 @@ func (c *Client) NewSession(ctx context.Context, workspace string) (harness.Sess
 	return fromWireSession(out), nil
 }
 
+// ResumeSession attaches an existing session, taking DSH's single-writer lock
+// in the host. It fails when another process already holds that lock, which is
+// the normal case while the desktop has the session open.
 func (c *Client) ResumeSession(ctx context.Context, sessionID, workspace string) (harness.Session, error) {
 	var out hostwire.Session
 	if err := c.call(ctx, hostwire.MethodSessionResume,
@@ -463,6 +472,7 @@ func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
 	return c.call(ctx, hostwire.MethodSessionClose, hostwire.SessionRef{SessionID: sessionID}, nil)
 }
 
+// SetConfigOption changes model or reasoning effort for later turns.
 func (c *Client) SetConfigOption(ctx context.Context, sessionID, optionID, valueID string) ([]harness.ConfigOption, error) {
 	var out hostwire.SetConfigResult
 	if err := c.call(ctx, hostwire.MethodSessionSetConfig, hostwire.SetConfigParams{
@@ -477,6 +487,8 @@ func (c *Client) SetConfigOption(ctx context.Context, sessionID, optionID, value
 	return options, nil
 }
 
+// Cancel asks the host to interrupt the turn in flight. It returns as soon as
+// the request is accepted; the turn settles asynchronously.
 func (c *Client) Cancel(ctx context.Context, sessionID string) error {
 	return c.call(ctx, hostwire.MethodSessionCancel, hostwire.SessionRef{SessionID: sessionID}, nil)
 }
@@ -658,16 +670,16 @@ func (c *Client) deliver(result hostwire.TurnResult) {
 
 // sendDecision answers a relayed approval. It is a command rather than a
 // response, so it works whatever connection the request arrived on.
-func (c *Client) sendDecision(d hostwire.PermissionDecisionParams) {
+func (c *Client) sendDecision(ctx context.Context, d hostwire.PermissionDecisionParams) {
 	conn := c.current()
 	if conn == nil {
 		c.logger.Warn("an approval was decided with no host connected",
 			"approval", d.RequestID, "option", d.OptionID)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), c.opts.CallTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, c.opts.CallTimeout)
 	defer cancel()
-	if err := conn.Call(ctx, hostwire.MethodPermissionDecide, d, nil); err != nil {
+	if err := conn.Call(callCtx, hostwire.MethodPermissionDecide, d, nil); err != nil {
 		c.logger.Warn("could not deliver an approval decision",
 			"approval", d.RequestID, "error", err.Error())
 	}
@@ -709,6 +721,8 @@ func (c *Client) Drain(ctx context.Context, reason string, force bool) (hostwire
 	return status, err
 }
 
+// InstanceID names this gateway process, for logs and for the host's own record
+// of who is driving it.
 func (c *Client) InstanceID() string { return c.opts.InstanceID }
 
 /* -------------------------------------------------------------------- timing */

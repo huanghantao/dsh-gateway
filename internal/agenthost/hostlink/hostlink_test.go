@@ -38,7 +38,7 @@ func socketPath(t *testing.T) string {
 func TestListenAndDialRoundTrip(t *testing.T) {
 	path := socketPath(t)
 
-	listener, err := Listen(path)
+	listener, err := Listen(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestListenAndDialRoundTrip(t *testing.T) {
 func TestSocketIsNotWorldAccessible(t *testing.T) {
 	path := socketPath(t)
 
-	listener, err := Listen(path)
+	listener, err := Listen(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSocketIsNotWorldAccessible(t *testing.T) {
 func TestListenRefusesWhenAHostIsAlreadyServing(t *testing.T) {
 	path := socketPath(t)
 
-	first, err := Listen(path)
+	first, err := Listen(context.Background(), path)
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestListenRefusesWhenAHostIsAlreadyServing(t *testing.T) {
 		}
 	}()
 
-	if _, err := Listen(path); err == nil {
+	if _, err := Listen(context.Background(), path); err == nil {
 		t.Fatal("a second host bound the same socket while the first was serving; " +
 			"it would hold no sessions and the first would keep turns nothing could reach")
 	}
@@ -145,7 +145,7 @@ func TestListenRefusesWhenAHostIsAlreadyServing(t *testing.T) {
 func TestListenRemovesAStaleSocket(t *testing.T) {
 	path := socketPath(t)
 
-	first, err := Listen(path)
+	first, err := Listen(context.Background(), path)
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
 	}
@@ -157,11 +157,11 @@ func TestListenRemovesAStaleSocket(t *testing.T) {
 		t.Skipf("the platform removed the socket on close, so there is no stale case: %v", err)
 	}
 
-	second, err := Listen(path)
+	second, err := Listen(context.Background(), path)
 	if err != nil {
 		t.Fatalf("Listen over a stale socket: %v", err)
 	}
-	defer func() { _ = second.Close() }()
+	t.Cleanup(func() { _ = second.Close() })
 }
 
 // TestListenRefusesToReplaceSomethingElse is the safety rail: a misconfigured
@@ -172,7 +172,7 @@ func TestListenRefusesToReplaceSomethingElse(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := Listen(path); err == nil {
+	if _, err := Listen(context.Background(), path); err == nil {
 		t.Fatal("Listen replaced a regular file; a wrong path must fail, not delete")
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -189,7 +189,7 @@ func TestDialWaitsForAHostThatIsNotUpYet(t *testing.T) {
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		listener, err := Listen(path)
+		listener, err := Listen(context.Background(), path)
 		if err != nil {
 			return
 		}
@@ -208,7 +208,7 @@ func TestDialWaitsForAHostThatIsNotUpYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial did not wait for the host to appear: %v", err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
 		t.Errorf("Dial returned after %s, before the host could have been up", elapsed)
 	}

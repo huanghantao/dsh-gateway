@@ -668,7 +668,6 @@ func (c Config) ValidateWorkspaces() error {
 	return errors.Join(problems...)
 }
 
-// SessionsDir returns the effective session-log root.
 // SocketPath is where the agent host listens, and where this gateway looks for
 // it. It is derived from the state directory so that the two ends cannot be
 // configured to disagree — a mismatch there is a silent "host unavailable" that
@@ -685,6 +684,11 @@ const AgentHostSocket = "agent-host.sock"
 // reads as a deliberate statement rather than a line that does nothing.
 const DSHModeAgentHost = "agent-host"
 
+// SessionsDir is the DSH session store this deployment reads history from. It
+// follows DSH_HOME, because the phone and the desktop have to see one store.
+// SessionsDir returns the effective session-log root: where DSH keeps the logs
+// this deployment reads history from. It follows DSH_HOME, because the phone and
+// the desktop have to see one store.
 func (c Config) SessionsDir() string {
 	if c.Transcript.SessionsDir != "" {
 		return c.Transcript.SessionsDir

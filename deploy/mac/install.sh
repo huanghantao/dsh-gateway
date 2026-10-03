@@ -989,7 +989,7 @@ job_pid() {
 # a settling sleep would have missed it entirely — which the first version of
 # this check did.
 wait_for_stable() {
-	local label="$1" uid first last changes=0 waited=0
+	local label="$1" uid first last pid changes=0 waited=0
 	uid="$(id -u)"
 
 	# launchd has already started it by the time bootstrap returns, so the pid
@@ -1000,7 +1000,6 @@ wait_for_stable() {
 	while (( waited < 32 )); do
 		sleep 0.2
 		waited=$((waited + 1))
-		local pid
 		pid="$(job_pid "$label")"
 		if [[ -n $pid && $pid != "$last" ]]; then
 			changes=$((changes + 1))

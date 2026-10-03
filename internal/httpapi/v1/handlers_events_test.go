@@ -43,12 +43,18 @@ func dialEvents(t *testing.T, ts *testServer, query string) (*websocket.Conn, co
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
 
-	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+	conn, resp, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"Cookie": []string{"dsh_gw_session=" + ts.token},
 			"Origin": []string{srv.URL},
 		},
 	})
+	if resp != nil && resp.Body != nil {
+		// A successful upgrade turns the response body into the connection
+		// itself; closing it here closes nothing the websocket still needs, and
+		// keeps the failure path from leaking a body.
+		defer func() { _ = resp.Body.Close() }()
+	}
 	if err != nil {
 		t.Fatalf("dial %s: %v", url, err)
 	}

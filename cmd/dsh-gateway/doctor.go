@@ -194,7 +194,7 @@ func checkAgentHost(ctx context.Context, cfg config.Config, timeout time.Duratio
 	defer func() { _ = conn.Close() }()
 
 	wire := hostwire.NewConn(conn)
-	wire.SetErrorClassifier(func(err error) *hostwire.Error { return hostwire.ErrorOf(err) })
+	wire.SetErrorClassifier(hostwire.ErrorOf)
 	wire.Start()
 
 	// A read-only probe. `doctor` is run precisely when something is wrong, and

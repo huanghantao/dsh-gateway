@@ -74,7 +74,9 @@ func realMain(args []string) int {
 }
 
 func usage(w *os.File) {
-	fmt.Fprint(w, `dsh-agent-host — hold the DeepSeek Harness child across gateway redeploys
+	// The write is to stdout or stderr at the end of a usage path; a failure
+	// there has nowhere to be reported and does not change the exit code.
+	_, _ = fmt.Fprint(w, `dsh-agent-host — hold the DeepSeek Harness child across gateway redeploys
 
 Usage:
   dsh-agent-host serve [flags]   hold the child and serve the control socket
@@ -213,7 +215,7 @@ func runServe(args []string) error {
 	}
 
 	socketPath := f.socketPath(cfg)
-	listener, err := hostlink.Listen(socketPath)
+	listener, err := hostlink.Listen(ctx, socketPath)
 	if err != nil {
 		return err
 	}
@@ -304,7 +306,7 @@ func runStatus(args []string) error {
 	defer func() { _ = conn.Close() }()
 
 	wire := hostwire.NewConn(conn)
-	wire.SetErrorClassifier(func(err error) *hostwire.Error { return hostwire.ErrorOf(err) })
+	wire.SetErrorClassifier(hostwire.ErrorOf)
 	wire.Start()
 
 	// Deliberately not ClaimsControl: this command reports, and taking the role

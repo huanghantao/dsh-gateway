@@ -42,7 +42,7 @@ const maxPath = 103
 // It refuses to start when something is already answering, so a second host
 // cannot silently take over from a first: the second would have no sessions and
 // the first would keep running turns nobody could reach.
-func Listen(path string) (net.Listener, error) {
+func Listen(ctx context.Context, path string) (net.Listener, error) {
 	if len(path) > maxPath {
 		return nil, fmt.Errorf(
 			"hostlink: the socket path is %d characters and the limit is %d, so it cannot be created\n"+
@@ -53,11 +53,11 @@ func Listen(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("hostlink: create %s: %w", filepath.Dir(path), err)
 	}
-	if err := removeStale(path); err != nil {
+	if err := removeStale(ctx, path); err != nil {
 		return nil, err
 	}
 
-	listener, err := net.Listen("unix", path)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("hostlink: listen on %s: %w", path, err)
 	}
@@ -80,7 +80,7 @@ func Listen(path string) (net.Listener, error) {
 func Dial(ctx context.Context, path string, waitFor time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(waitFor)
 	for {
-		conn, err := net.DialTimeout("unix", path, 2*time.Second)
+		conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", path)
 		if err == nil {
 			return conn, nil
 		}
@@ -111,7 +111,7 @@ func Alive(ctx context.Context, path string) bool {
 // host that is already running must not be displaced by a second one, because
 // the second would come up with no sessions while the first kept running turns
 // that nothing could reach.
-func removeStale(path string) error {
+func removeStale(ctx context.Context, path string) error {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -123,9 +123,9 @@ func removeStale(path string) error {
 		return fmt.Errorf("hostlink: %s exists and is not a socket; refusing to replace it", path)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if Alive(ctx, path) {
+	if Alive(probeCtx, path) {
 		return fmt.Errorf("hostlink: %s is already served by a running agent host", path)
 	}
 	if err := os.Remove(path); err != nil {

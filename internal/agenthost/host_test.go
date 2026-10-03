@@ -26,7 +26,6 @@ type stubHarness struct {
 	mu       sync.Mutex
 	state    harness.State
 	sessions map[string]harness.Session
-	prompts  []string
 	// release, when set, is closed by Prompt to end a turn on demand. It is how
 	// a test holds a turn open for as long as it needs to.
 	hold   chan struct{}
@@ -255,12 +254,6 @@ func newPair(t *testing.T) *pair {
 		_ = srv.Close(context.Background())
 	})
 	return p
-}
-
-func (p *pair) updatesSeen() []harness.Update {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]harness.Update(nil), p.updates...)
 }
 
 /* --------------------------------------------------------------------- tests */
@@ -609,7 +602,7 @@ func TestInspectingTheHostDoesNotDisplaceTheGateway(t *testing.T) {
 	go srv.Serve(context.Background(), hostwire.NewConn(inspectEnd))
 
 	inspect := hostwire.NewConn(inspectClientEnd)
-	inspect.SetErrorClassifier(func(err error) *hostwire.Error { return hostwire.ErrorOf(err) })
+	inspect.SetErrorClassifier(hostwire.ErrorOf)
 	inspect.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -275,7 +275,7 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 	// makes single-instance a property of the operating system rather than of
 	// everyone remembering to be careful, and it fails before any shared state
 	// has been touched.
-	listener, err := net.Listen("tcp", cfg.Listen)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("cannot listen on %s: %w\n"+
 			"       Another gateway is probably already serving this deployment. "+
@@ -322,13 +322,19 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		ReconnectBackoff:    cfg.DSH.RestartBackoff.Std(),
 		MaxReconnectBackoff: cfg.DSH.MaxRestartBackoff.Std(),
 	})
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Limits.ShutdownTimeout.Std())
+	// The cleanup context is created here, from Background, rather than inside
+	// the deferred call: by the time it runs, `ctx` is cancelled — that is what
+	// shutting down means — so deriving from it would leave every cleanup step
+	// with an expired deadline. Saying that once, at the point the context is
+	// made, is clearer than a note on a function nobody will look at.
+	closeHarness := func() { //nolint:contextcheck // the context is created inside, from Background, deliberately
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), cfg.Limits.ShutdownTimeout.Std())
 		defer cancel()
-		if err := harnessDriver.Close(shutdownCtx); err != nil {
+		if err := harnessDriver.Close(cleanupCtx); err != nil { //nolint:contextcheck // rooted at Background deliberately; see above
 			logger.Warn("could not close the agent host connection", "error", err.Error())
 		}
-	}()
+	}
+	defer closeHarness()
 	logger.Info("driving the agent through the agent host",
 		"socket", socketPath, "instance", instanceID)
 
