@@ -165,13 +165,23 @@ fresh connection may replay from a sequence the client never had.
 session is leased the conversation's header carries a "Held" chip explaining that
 the desktop cannot open it, with a one-tap release behind it.
 
-**Whose turn it is.** A turn this phone holds replaces Send with Stop, and the
-two are exclusive: a prompt sent while a turn is running is refused with
-`prompt_in_flight`, and this gateway does not queue one behind another. The live
-signal is `turn.state`; when the client holds no turn frame — a page loaded
-mid-turn — the session's own `busy` flag decides, because the stream carries no
-snapshot (see judgement call 13). A session another writer holds keeps Send
-disabled and says so instead.
+**Whose turn it is.** A turn this phone holds shows Stop beside Send rather than
+instead of it: a prompt sent while a turn is running is *queued*, and the answer
+says where it stands. The queue strip above the composer lists what is waiting
+and lets one be dropped without stopping the turn. `session.promptQueueDepth: 0`
+restores the older behaviour, where Send is disabled mid-turn and a prompt sent
+anyway is refused with `prompt_in_flight` — the client reads the depth from
+`GET /me` rather than assuming either.
+
+The live signal is `turn.state`, and the client keeps two things from it: the
+turn in flight and the queue behind it. A `queued` frame adds to the queue, a
+`running` frame promotes one out of it, and a settled frame clears whichever
+ticket it names — so a stale `completed` for an older turn cannot blank a newer
+one. When the client holds no turn frame at all — a page loaded mid-turn — the
+session resource's own `turn` and `queue` decide, which is why they are on it:
+the event that announced the turn may be long past the replay window (see
+judgement call 13). A session another writer holds keeps Send disabled and says
+so instead.
 
 **Approvals** are mounted on `document.body`, outside `#app`, so they are
 answerable from every screen; while one is pending the rest of the shell is

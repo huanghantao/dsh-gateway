@@ -11,6 +11,14 @@
  *   blocking decision a keyboard cannot reach is not blocking, it is a deadlock.
  * - **Honest about the clock.** The countdown is derived from `expiresAt`, and at
  *   zero the buttons are disabled rather than left to fail with a 409.
+ * - **Readable before it is answerable.** A file edit asks about two long JSON
+ *   strings; deciding on `{"file_path":…,"old_string":"…"}` from a phone is
+ *   guessing. A recorded file change is rendered as a diff, a destructive
+ *   command is named as one, and the raw arguments stay one tap away — the diff
+ *   is a convenience, the input is the truth.
+ * - **Clear about what each choice does.** The harness's allow-once/reject-once
+ *   answer *this* request and stay the dominant pair; a scoped grant answers it
+ *   for a while, and says for how long.
  *
  * Requests are shown one at a time: `alertdialog` semantics only hold for a
  * single decision, and stacking them invites a mis-tap on the wrong one.
@@ -19,23 +27,154 @@
 import type { Ctx } from "../actions.js";
 import { el, isolateBackground, trapFocus } from "../dom.js";
 import { formatCountdown } from "../format.js";
+import { describeTool, type ToolChange } from "../toolinfo.js";
 import type { Approval, ApprovalOption } from "../types.js";
 
 /** Mirrors the contract's documented options; used only if the server omits them. */
 const FALLBACK_OPTIONS: readonly ApprovalOption[] = [
-  { id: "allow-once", name: "Allow once" },
-  { id: "reject-once", name: "Reject" },
+  { id: "allow-once", name: "Allow once", grant: false },
+  { id: "reject-once", name: "Reject", grant: false },
 ];
 
 const TICK_MS = 1000;
 const URGENT_MS = 15_000;
 
+/** The sheet's notes are announced by id; one card is open at a time. */
+const RISK_NOTE_ID = "approval-risk-note";
+const GRANT_NOTE_ID = "approval-grant-note";
+
 /** Emphasis is derived from the id, so an unknown option still renders sanely. */
 function optionClass(option: ApprovalOption): string {
+  // A scoped choice is deliberately not the primary or danger treatment: it is
+  // a convenience with a lifetime, not the answer to this request.
+  if (option.grant) return "btn btn-grant";
   if (option.id.startsWith("allow")) return "btn btn-primary";
   if (option.id.startsWith("reject") || option.id.startsWith("deny")) return "btn btn-danger";
   return "btn btn-ghost";
 }
+
+/* -------------------------------------------------------------------- diff */
+
+/** `+14 −2`, or "" when the change added and removed nothing. */
+function diffStat(added: number, deleted: number): string {
+  const parts: string[] = [];
+  if (added > 0) parts.push(`+${added}`);
+  if (deleted > 0) parts.push(`−${deleted}`);
+  return parts.join(" ");
+}
+
+/**
+ * One line of a change.
+ *
+ * The leading sign is markup rather than the line's text: the class carries it
+ * for the stylesheet, and an aria-hidden span carries it for the eye, so the
+ * spoken text does not begin with a sign on every single line. What the change
+ * amounts to is said once, on the block.
+ */
+function diffLine(line: string): HTMLElement {
+  const sign = line.slice(0, 1);
+  const kind = sign === "+" ? "diff-add" : sign === "-" ? "diff-del" : "diff-ctx";
+  return el(
+    "div",
+    { class: `diff-line ${kind}` },
+    el("span", { attrs: { "aria-hidden": "true" }, text: sign === "" ? " " : sign }),
+    line.slice(1),
+  );
+}
+
+/** The change in words, for a reader the colours do not reach. */
+function diffLabel(change: ToolChange): string {
+  const parts = [`Change to ${change.display}`];
+  if (change.added > 0) parts.push(`${change.added} added`);
+  if (change.deleted > 0) parts.push(`${change.deleted} removed`);
+  if (change.wholeFile) parts.push("the previous contents are not recorded");
+  if (change.truncated) parts.push("it is shown cut short");
+  return `${parts.join(", ")}.`;
+}
+
+/** What the diff does not show, said plainly rather than left to be assumed. */
+function diffNote(change: ToolChange): string {
+  const notes: string[] = [];
+  if (change.wholeFile) {
+    notes.push("The log does not record what this file held before, so only the new contents are shown.");
+  }
+  if (change.truncated) {
+    notes.push("This change was cut short to keep it renderable; more of the file changed than is shown here.");
+  }
+  return notes.join(" ");
+}
+
+/** The changed file: a caption, its lines, and a note when the diff is partial. */
+function diffBlock(change: ToolChange): readonly Node[] {
+  const stat = diffStat(change.added, change.deleted);
+  const head = el("p", {
+    class: "diff-head",
+    text: stat === "" ? change.display : `${change.display} · ${stat}`,
+  });
+  const lines = el("div", { class: "diff", attrs: { role: "group", "aria-label": diffLabel(change) } });
+  for (const line of change.lines) lines.appendChild(diffLine(line));
+
+  const nodes: Node[] = [head, lines];
+  const note = diffNote(change);
+  // Beside the block, not inside it: a note below a scrolling diff is a note a
+  // reader who never scrolls to the end never sees.
+  if (note !== "") nodes.push(el("p", { class: "diff-note", text: note }));
+  return nodes;
+}
+
+/** The arguments as they arrived. Never reformatted — this is the bytes being judged. */
+function rawInput(input: string): HTMLElement {
+  return el("pre", { class: "approval-input", text: input === "" ? "(no input)" : input });
+}
+
+/* ------------------------------------------------------------ grant choices */
+
+/** A lifetime in words: "45 seconds", "30 minutes", "2 hours", "1 day". */
+function spellSeconds(seconds: number): string {
+  const units: readonly (readonly [number, string])[] = [
+    [86_400, "day"],
+    [3_600, "hour"],
+    [60, "minute"],
+  ];
+  for (const [size, name] of units) {
+    // Only an exact multiple reads honestly: 5400 seconds is "90 minutes", not
+    // "1.5 hours".
+    if (seconds >= size && seconds % size === 0) {
+      const count = seconds / size;
+      return `${count} ${name}${count === 1 ? "" : "s"}`;
+    }
+  }
+  return `${Math.round(seconds)} second${seconds === 1 ? "" : "s"}`;
+}
+
+/**
+ * One sentence over the scoped choices, saying what they are not.
+ *
+ * The harness's own pair answers the request in front of the reader; these
+ * answer it for a while, and the whole reason a lifetime is on screen is that
+ * agreeing to one is a different decision from agreeing to a single call.
+ */
+function grantNote(ttlSecs: number): string {
+  if (ttlSecs > 0) {
+    return `Or answer it for a while: the choices below stay in force for the next ${spellSeconds(ttlSecs)}, in this session.`;
+  }
+  return "Or answer it for a while: the choices below stay in force beyond this one call, in this session.";
+}
+
+/**
+ * The session root a path may be shortened against, or "" when it is not known.
+ *
+ * An approval can belong to a session that is not the one on screen, and a path
+ * shortened against the wrong root is worse than a long one: it names a file in
+ * a checkout the reader is not looking at.
+ */
+function workspaceFor(approval: Approval, ctx: Ctx): string {
+  const active = ctx.store.state.active;
+  if (active === null || active.sessionId !== approval.sessionId) return "";
+  return active.session?.workspace ?? "";
+}
+
+/* -------------------------------------------------------------------- card */
 
 interface ApprovalCard {
   readonly node: HTMLElement;
@@ -57,6 +196,11 @@ function buildCard(approval: Approval, queued: number, ctx: Ctx): ApprovalCard {
   // hidden rather than faked.
   const totalWindow = Number.isNaN(expiresAt) ? Number.NaN : Math.max(1, expiresAt - (Number.isNaN(requestedAt) ? expiresAt - 1 : requestedAt));
 
+  const { change, risk } = describeTool(approval.tool, approval.input, workspaceFor(approval, ctx));
+  // A change with no lines to draw is not a diff — an empty whole-file write
+  // would be a blank box that says nothing — so it falls back to the bytes.
+  const shown = change !== null && change.lines.length > 0 ? change : null;
+
   const countdown = el("span", { class: "countdown-text", text: "" });
   const progress = el("progress", { class: "countdown-bar", attrs: { max: "100", value: "100" } });
   const timerRow = el(
@@ -67,34 +211,62 @@ function buildCard(approval: Approval, queued: number, ctx: Ctx): ApprovalCard {
     progress,
   );
   const errorBox = el("p", { class: "alert alert-error", attrs: { role: "alert", hidden: "" } });
-  const buttons = el("div", { class: "approval-actions" });
+  const actions = el("div", { class: "approval-actions" });
 
   let settled = false;
 
-  const controls = options.map((option) =>
-    el("button", {
-      class: optionClass(option),
-      attrs: { type: "button" },
-      text: option.name,
-      on: {
-        click: () => {
-          if (settled) return;
-          // One decision per card: a double tap must not send two POSTs, the
-          // second of which would 409.
-          settled = true;
-          sync();
-          void ctx.decideApproval(approval, option.id);
-        },
-      },
-    }),
-  );
-  buttons.append(...controls);
+  const decide = (optionId: string): void => {
+    if (settled) return;
+    // One decision per card: a double tap must not send two POSTs, the second
+    // of which would 409.
+    settled = true;
+    sync();
+    void ctx.decideApproval(approval, optionId);
+  };
 
+  const harnessChoices: HTMLButtonElement[] = [];
+  const scopedChoices: HTMLButtonElement[] = [];
+  for (const option of options) {
+    const control = el("button", {
+      class: optionClass(option),
+      attrs: {
+        type: "button",
+        // The lifetime belongs to the choice rather than to the region above it:
+        // a reader who reaches a grant button hears how long it lasts.
+        "aria-describedby": option.grant ? GRANT_NOTE_ID : null,
+      },
+      text: option.name,
+      on: { click: () => decide(option.id) },
+    });
+    (option.grant ? scopedChoices : harnessChoices).push(control);
+  }
+  const controls: readonly HTMLButtonElement[] = [...harnessChoices, ...scopedChoices];
+  actions.append(...harnessChoices);
+  if (scopedChoices.length > 0) {
+    actions.append(
+      el("p", {
+        class: "approval-grant-note",
+        attrs: { id: GRANT_NOTE_ID },
+        text: grantNote(ctx.store.state.features.approvalGrantTTLSecs),
+      }),
+      ...scopedChoices,
+    );
+  }
+
+  // The warning hangs off the dialog rather than off a button, because
+  // `activate` puts focus on the dialog: this is the one place it is read out
+  // with the title instead of waiting to be tabbed into.
   const card = el(
     "div",
     {
       class: "sheet approval",
-      attrs: { role: "alertdialog", "aria-modal": "true", "aria-labelledby": "approval-title", tabindex: "-1" },
+      attrs: {
+        role: "alertdialog",
+        "aria-modal": "true",
+        "aria-labelledby": "approval-title",
+        "aria-describedby": risk === "" ? null : RISK_NOTE_ID,
+        tabindex: "-1",
+      },
     },
     el(
       "header",
@@ -104,10 +276,14 @@ function buildCard(approval: Approval, queued: number, ctx: Ctx): ApprovalCard {
       queued > 0 ? el("p", { class: "approval-queue", text: `${queued} more waiting after this one` }) : null,
     ),
     timerRow,
-    el("h3", { class: "tool-label", text: "Requested input" }),
-    el("pre", { class: "approval-input", text: approval.input === "" ? "(no input)" : approval.input }),
+    risk === "" ? null : el("p", { class: "risk-chip", attrs: { id: RISK_NOTE_ID }, text: `Look twice: ${risk}.` }),
+    el("h3", { class: "tool-label", text: shown === null ? "Requested input" : "Proposed change" }),
+    ...(shown === null ? [rawInput(approval.input)] : diffBlock(shown)),
+    shown === null
+      ? null
+      : el("details", { class: "approval-raw" }, el("summary", { text: "Raw arguments" }), rawInput(approval.input)),
     errorBox,
-    buttons,
+    actions,
   );
 
   const panel = el("div", { class: "sheet-backdrop approval-backdrop" }, card);

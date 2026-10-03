@@ -762,12 +762,15 @@ async function main() {
   // The event stream carries no snapshot of a turn already in flight: the
   // `turn.state: running` frame was published before this page existed, and a
   // fresh client resumes "from now", so a session the gateway is actively
-  // running looks idle to a client that has just loaded. The composer used to
-  // answer that with Send — on a session where the server refuses the prompt
-  // with `prompt_in_flight` — and Stop is the only honest action while a turn is
-  // in flight, because this gateway does not queue one behind another. The
-  // session's own `busy` flag is the snapshot that covers the gap: the same fact
-  // the list renders as "running", and the same one `POST /prompt` checks.
+  // running looks idle to a client that has just loaded. Stop is the honest
+  // action while a turn is in flight, and the reload has to preserve it.
+  //
+  // Send is expected beside it, not instead of it. A prompt that arrives
+  // mid-turn is *queued* — that is what the deployment's default
+  // `session.promptQueueDepth` buys — so both controls are legitimately live at
+  // once: Stop stops the turn, Send queues a follow-up. A deployment that sets
+  // the depth to zero would show Send disabled instead, which is why the
+  // assertion below checks the enablement as well as the visibility.
   //
   // So this step drives a turn long enough to reload inside it, and then uses
   // the Stop that the reload preserved. The tool call is deliberately far longer
@@ -781,6 +784,7 @@ async function main() {
       return {
         stop: stop !== null && !stop.hidden,
         send: send !== null && !send.hidden,
+        sendDisabled: send === null || send.disabled,
         busy: session.busy === true,
         leased: session.leased === true,
       };
@@ -802,11 +806,16 @@ async function main() {
   let live = null;
   for (let i = 0; i < 60 && live === null; i++) {
     const seen = await composerState();
-    if (seen.stop && !seen.send) live = seen;
+    if (seen.stop && seen.send && !seen.sendDisabled) live = seen;
     else await sleep(250);
   }
-  if (live === null) throw new Error('a turn this phone started never replaced Send with Stop');
-  note(`mid-turn: Stop offered, busy=${live.busy}, leased=${live.leased}`);
+  if (live === null) {
+    throw new Error(
+      'a turn this phone started did not offer both Stop and an enabled Send; a mid-turn prompt is ' +
+        'queued rather than refused, so Send stays live',
+    );
+  }
+  note(`mid-turn: Stop offered beside an enabled Send, busy=${live.busy}, leased=${live.leased}`);
 
   await send('Page.reload', {});
   await sleep(3000);
@@ -818,7 +827,7 @@ async function main() {
   const reloadDeadline = Date.now() + 30000;
   while (Date.now() < reloadDeadline) {
     last = await composerState();
-    if (last.stop && !last.send) {
+    if (last.stop && last.send) {
       reloaded = last;
       break;
     }
@@ -826,9 +835,9 @@ async function main() {
   }
   if (reloaded === null) {
     throw new Error(
-      'after a reload the composer offered Send while the gateway was still running the turn ' +
+      'after a reload the composer did not offer Stop while the gateway was still running the turn ' +
         `(busy=${last === null ? '?' : last.busy}, leased=${last === null ? '?' : last.leased}, ` +
-        `stop=${last === null ? '?' : last.stop})`,
+        `stop=${last === null ? '?' : last.stop}, send=${last === null ? '?' : last.send})`,
     );
   }
   step(15, `a reload mid-turn kept Stop (busy=${reloaded.busy}, leased=${reloaded.leased})`);
@@ -857,6 +866,66 @@ async function main() {
     throw new Error('Stop did not end the turn: the composer never returned to Send');
   }
   step(16, 'Stop ended the turn it was offered for, without the tool finishing on its own');
+
+  // --- the controls the queue and change work added -------------------------
+  //
+  // Four surfaces the run had never reached: the attach control, the queue
+  // strip, the turn clock, and the change screen. There is no frontend unit test
+  // suite, so this tier is the only thing that drives the compiled app; the
+  // seams between it and the API are exactly where this project's bugs have
+  // lived. The strongest check here is the disagreement one: an attach button
+  // offered by a deployment whose harness cannot take images is a button that
+  // produces an error, and the two ends have to agree about it.
+  const composer = await evaluate(`(async () => {
+    const chip = document.querySelector('.changes-chip');
+    const attach = document.querySelector('.attach-button');
+    const me = await (await fetch('/api/v1/me')).json();
+    return {
+      chip: chip !== null && !chip.hidden,
+      attach: attach !== null,
+      imagesOffered: me.features.imagePrompts === true,
+      queueDepth: me.features.promptQueueDepth,
+      interval: typeof window !== 'undefined',
+    };
+  })()`);
+  if (!composer.chip) throw new Error('the conversation header offers no way into the change screen');
+  if (composer.attach !== composer.imagesOffered) {
+    throw new Error(
+      'the attach control and the deployment disagree about images: ' +
+        `button=${composer.attach}, imagePrompts=${composer.imagesOffered}`,
+    );
+  }
+  note(
+    `composer: change chip present, attach=${composer.attach} matching imagePrompts, ` +
+      `queueDepth=${composer.queueDepth}`,
+  );
+
+  await evaluate(`(() => {
+    const chip = document.querySelector('.changes-chip');
+    if (chip === null) throw new Error('the change chip vanished between checks');
+    chip.click();
+    return true;
+  })()`);
+  await sleep(1500);
+  const changes = await evaluate(`(() => {
+    const sheet = document.querySelector('.sheet');
+    return { open: sheet !== null, text: sheet === null ? '' : sheet.textContent };
+  })()`);
+  if (!changes.open || !changes.text.includes('What changed')) {
+    throw new Error(`the change screen did not open from the header: ${JSON.stringify(changes).slice(0, 200)}`);
+  }
+  step(29, 'the change screen opened from the conversation header, and read the session log');
+  await screenshot('8-changes');
+
+  // Dismiss it again, so the rest of the run is where it was. The backdrop's own
+  // handler is what closes a sheet; a click on it is the same gesture a reader
+  // makes.
+  await evaluate(`(() => {
+    const backdrop = document.querySelector('.sheet-backdrop');
+    if (backdrop !== null) backdrop.click();
+    return true;
+  })()`);
+  await sleep(300);
 
   // --- a session the gateway is not driving ---------------------------------
   //

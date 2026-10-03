@@ -38,6 +38,7 @@ export function feedFromTranscript(items: readonly TranscriptItem[]): readonly F
           thinking: null,
           model: null,
           usage: null,
+          attachments: item.attachments,
         });
         break;
       case "assistant":
@@ -50,6 +51,7 @@ export function feedFromTranscript(items: readonly TranscriptItem[]): readonly F
           thinking: item.thinking,
           model: item.model,
           usage: item.usage,
+          attachments: 0,
         });
         break;
       case "tool":
@@ -145,7 +147,22 @@ export function applyToolEnd(feed: readonly FeedItem[], data: ToolData, time: st
   ];
 }
 
-export function appendUserMessage(feed: readonly FeedItem[], text: string, time: string): readonly FeedItem[] {
+/**
+ * Appends the operator's own prompt.
+ *
+ * `attachments` is the count of images sent with it. The app has the images in
+ * hand and could render them, but it deliberately does not: the transcript
+ * projection carries the count and not the bytes, so a locally rendered image
+ * would vanish on the next reload and the row would change shape under the
+ * reader. Showing the same "2 images" marker both ways keeps a prompt looking
+ * like itself.
+ */
+export function appendUserMessage(
+  feed: readonly FeedItem[],
+  text: string,
+  time: string,
+  attachments = 0,
+): readonly FeedItem[] {
   return [
     ...feed,
     {
@@ -157,6 +174,7 @@ export function appendUserMessage(feed: readonly FeedItem[], text: string, time:
       thinking: null,
       model: null,
       usage: null,
+      attachments,
     },
   ];
 }
@@ -194,6 +212,7 @@ export function appendMessage(feed: readonly FeedItem[], data: MessageData, time
       thinking: data.thinking,
       model: data.model,
       usage: data.usage,
+      attachments: 0,
     },
   ];
 }
@@ -231,5 +250,7 @@ export function mergeSessionPatch(session: Session, patch: SessionPatch): Sessio
     archived: session.archived,
     archivedOnDesk: session.archivedOnDesk,
     pinned: session.pinned,
+    turn: session.turn,
+    queue: session.queue,
   };
 }

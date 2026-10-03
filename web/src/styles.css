@@ -1549,7 +1549,7 @@ body {
 }
 
 .receipt-label {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -1562,7 +1562,7 @@ body {
 }
 
 .receipt-hint {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.78rem;
 }
 
@@ -1583,7 +1583,7 @@ body {
 }
 
 .receipt-tool-count {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .receipt-tool-failed {
@@ -1614,7 +1614,7 @@ body {
   justify-content: space-between;
   gap: 0.5rem;
   margin: 0.5rem 0;
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.82rem;
 }
 
@@ -1642,8 +1642,355 @@ body {
 }
 
 .field-label {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+/*
+ * Changes, in one place.
+ *
+ * The same markup is used by three screens — a tool card in the transcript, the
+ * approval sheet, and the change review — because they are three views of one
+ * thing: what a tool call did to a file. A reader who learned to scan a diff in
+ * one of them should not have to learn it again in the next.
+ */
+.diff-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0 4px;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.diff {
+  /* `overflow-x` rather than wrapping: a diff line that wraps loses the
+     alignment that makes a diff readable in the first place. */
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  /* Long lines scroll; the block itself never grows past a comfortable read. */
+  max-height: 46dvh;
+  overflow-y: auto;
+}
+.diff-line {
+  display: block;
+  padding: 0 10px;
+  white-space: pre;
+  /* The sign lives in an aria-hidden span inside the line, kept in the flow so
+     that copied text still reads like a diff. */
+}
+.diff-add {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  color: color-mix(in srgb, var(--ok) 78%, var(--text));
+}
+.diff-del {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: color-mix(in srgb, var(--danger) 82%, var(--text));
+}
+.diff-ctx {
+  color: var(--text-muted);
+}
+.diff-note {
+  margin: 6px 0 0;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+/*
+ * A command worth reading twice.
+ *
+ * Deliberately styled as a caution rather than an alarm: it names a shape the
+ * gateway recognises, and its absence claims nothing at all. Nothing in this
+ * stylesheet may make "no chip" look like "verified safe".
+ */
+.risk-chip {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* The exact bytes, folded away: the diff is a convenience, the input is truth. */
+.approval-raw {
+  margin: 4px 0 12px;
+}
+.approval-raw > summary {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.approval-raw .approval-input {
+  margin-top: 6px;
+}
+
+/*
+ * The scoped choices sit below the harness's own pair, with a sentence between
+ * them, because they are a different kind of decision: "allow once" answers
+ * this question, and these answer it for a while.
+ */
+.approval-grant-note {
+  margin: 10px 0 6px;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+.btn-grant {
+  background: var(--bg-sunken);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.btn-grant:active {
+  background: var(--bg);
+}
+
+/*
+ * Standing approvals on the settings screen. Each row is one authorisation that
+ * is answering prompts without asking, so the row says what it covers and when
+ * it stops — the two things that make it a decision rather than a switch.
+ */
+.grant-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.grant-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.grant-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.grant-tool {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+.grant-scope {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.grant-expiry {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/*
+ * Images waiting to be sent.
+ *
+ * A thumbnail row rather than a filename list: the reader picked a photograph,
+ * and the one thing worth checking before sending is that it is the right one.
+ */
+.attach-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 0 0 8px;
+}
+.attach-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+.attach-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 62%);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attach-button {
+  flex: 0 0 auto;
+}
+
+/*
+ * Prompts waiting behind the turn in flight.
+ *
+ * Above the composer rather than in the transcript, because it is a statement
+ * about what is *about* to happen — the transcript already shows each prompt
+ * where it was typed.
+ */
+.queue-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 0 8px;
+}
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.queue-position {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+}
+.queue-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-drop {
+  flex: 0 0 auto;
+  /* A 44px target in a 30px row: the padding is the touch area, the border is
+     what the reader sees. */
+  padding: 10px;
+  margin: -6px -4px -6px 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.queue-drop:active {
+  color: var(--danger);
+}
+
+/* The header chip that opens the change screen. It sits beside the lease chip,
+   which is the other thing about a session that is worth a glance. */
+.changes-chip {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 0.9rem;
+}
+
+/*
+ * What changed.
+ *
+ * A review screen, so it is a list of files rather than a wall of diff: the
+ * summary answers "how much", the per-file head answers "where", and the hunks
+ * are there for the reader who has decided to look. The first files are open
+ * because that is what someone opening this screen came for.
+ */
+.changes-summary {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.changes-note {
+  margin: 6px 0 0;
+  font-size: 0.74rem;
+}
+.changes-file {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  padding: 10px;
+}
+.changes-file-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.changes-path {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+.changes-stat {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+.changes-reason {
+  margin: 6px 0 0;
+  font-size: 0.74rem;
+}
+.changes-hunk {
+  margin-top: 8px;
+}
+.changes-more {
+  margin-top: 4px;
+}
+.changes-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/*
+ * The per-file outcome after an undo. Coloured by state, because the one thing
+ * a reader needs from this list is which files came back and which did not.
+ */
+.changes-report {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.changes-result {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+  font-size: 0.76rem;
+}
+.changes-result.is-reverted .badge {
+  background: var(--ok);
+  color: var(--bg);
+}
+.changes-result.is-refused .badge {
+  background: var(--danger);
+  color: var(--bg);
+}
+.changes-result.is-skipped .badge {
+  color: var(--text-muted);
 }

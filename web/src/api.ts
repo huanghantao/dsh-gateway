@@ -14,21 +14,26 @@
  *   is simply to never proxy a request through anything that would forge it.
  */
 
-import { decodeApprovalList, decodeDevice, decodeDeviceList, decodeModels, decodeProblem, decodeReceipt, decodeSession, decodeSessionList, decodeTranscript, decodeTranscriptSearch, decodeTrashList, decodeTriage, decodeWorkspaceList, isRecord } from "./decode.js";
+import { decodeApprovalList, decodeChanges, decodeDevice, decodeDeviceList, decodeGrantList, decodeModels, decodePrincipal, decodeProblem, decodeReceipt, decodeRevertReport, decodeSession, decodeSessionList, decodeTranscript, decodeTranscriptSearch, decodeTrashList, decodeTriage, decodeTurn, decodeWorkspaceList, isRecord } from "./decode.js";
 import type {
   Approval,
+  ApprovalGrant,
   CreateSessionRequest,
   CurationDecision,
   Device,
   ModelsResponse,
   PairRequest,
   PairResponse,
+  Principal,
   Problem,
+  PromptBlock,
   PromptResponse,
   PushKey,
   PushSubscriptionRequest,
   Readiness,
+  RevertReport,
   Session,
+  SessionChanges,
   SessionListResponse,
   TranscriptResponse,
   SessionReceipt,
@@ -49,6 +54,12 @@ export const ERROR_CODES = {
   invalidPairingCode: "invalid_pairing_code",
   pairingLocked: "pairing_locked",
   promptInFlight: "prompt_in_flight",
+  queueFull: "queue_full",
+  tooManyTurns: "too_many_turns",
+  revertDisabled: "revert_disabled",
+  imageTooLarge: "image_too_large",
+  imagesUnsupported: "images_unsupported",
+  unsupportedImageType: "unsupported_image_type",
   approvalClosed: "approval_closed",
   unauthenticated: "unauthenticated",
   forbidden: "forbidden",
@@ -172,9 +183,9 @@ function decodePair(raw: unknown): PairResponse | null {
 }
 
 function decodePrompt(raw: unknown): PromptResponse | null {
-  if (!isRecord(raw)) return null;
-  const turnId = raw["turnId"];
-  return typeof turnId === "string" ? { turnId } : null;
+  // The answer is the whole ticket, not just an id: a client has to be able to
+  // tell "running" from "queued, second in line" without a second request.
+  return decodeTurn(raw);
 }
 
 function decodeSessionEnvelope(raw: unknown): Session | null {
@@ -216,8 +227,15 @@ export const api = {
 
   /* -------------------------------------------------------------- devices */
 
-  async me(signal?: AbortSignal): Promise<Device> {
-    return sendDecoded("/me", { method: "GET", ...(signal === undefined ? {} : { signal }) }, decodeDevice, "principal");
+  /**
+   * Who this device is, and what the deployment offers.
+   *
+   * The feature flags are why this is not just a device: a client that offered
+   * an attach button on a harness that cannot take images, or an undo on a
+   * read-only gateway, would be offering an action that fails.
+   */
+  async me(signal?: AbortSignal): Promise<Principal> {
+    return sendDecoded("/me", { method: "GET", ...(signal === undefined ? {} : { signal }) }, decodePrincipal, "principal");
   },
 
   async devices(signal?: AbortSignal): Promise<readonly Device[]> {
@@ -385,18 +403,57 @@ export const api = {
     return decodeTranscript(raw);
   },
 
-  /** At most one prompt per session may be in flight; a second is `409`. */
-  async prompt(id: string, text: string, signal?: AbortSignal): Promise<PromptResponse> {
+  /**
+   * Admits a prompt.
+   *
+   * A prompt that arrives while a turn is running is queued rather than
+   * refused, and the answer says which happened — unless the deployment set
+   * `promptQueueDepth` to zero, in which case it is a `409 prompt_in_flight`.
+   */
+  async prompt(id: string, blocks: readonly PromptBlock[], signal?: AbortSignal): Promise<PromptResponse> {
     return sendDecoded(
       `/sessions/${encodeURIComponent(id)}/prompt`,
-      { method: "POST", body: { blocks: [{ type: "text", text }] }, ...(signal === undefined ? {} : { signal }) },
+      { method: "POST", body: { blocks }, ...(signal === undefined ? {} : { signal }) },
       decodePrompt,
       "prompt acknowledgement",
     );
   },
 
+  /** Stops the running turn *and* discards anything queued behind it. */
   async cancel(id: string, signal?: AbortSignal): Promise<void> {
     await send(`/sessions/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {}, ...(signal === undefined ? {} : { signal }) });
+  },
+
+  /** Drops one queued prompt without stopping the turn in progress. */
+  async dropQueued(id: string, turnId: string, signal?: AbortSignal): Promise<void> {
+    await send(`/sessions/${encodeURIComponent(id)}/queue/${encodeURIComponent(turnId)}`, {
+      method: "DELETE",
+      ...(signal === undefined ? {} : { signal }),
+    });
+  },
+
+  /** What this session changed, projected from its own log. */
+  async changes(id: string, signal?: AbortSignal): Promise<SessionChanges> {
+    const raw = await send(`/sessions/${encodeURIComponent(id)}/changes`, {
+      method: "GET",
+      ...(signal === undefined ? {} : { signal }),
+    });
+    return decodeChanges(raw);
+  },
+
+  /**
+   * Undoes recorded changes.
+   *
+   * `403 revert_disabled` when the deployment has not opted in — the app hides
+   * the control in that case, so reaching this is a bug rather than a case.
+   */
+  async revert(id: string, paths: readonly string[], signal?: AbortSignal): Promise<RevertReport> {
+    const raw = await send(`/sessions/${encodeURIComponent(id)}/revert`, {
+      method: "POST",
+      body: paths.length === 0 ? {} : { paths },
+      ...(signal === undefined ? {} : { signal }),
+    });
+    return decodeRevertReport(raw);
   },
 
   /** Only the fields that are non-null are sent. */
@@ -428,6 +485,22 @@ export const api = {
       body: { optionId },
       ...(signal === undefined ? {} : { signal }),
     });
+  },
+
+  /**
+   * The standing authorisations currently answering approvals without asking.
+   *
+   * They are a resource rather than a detail of the sheet, because the only way
+   * to know one is in force is to be able to look.
+   */
+  async grants(signal?: AbortSignal): Promise<readonly ApprovalGrant[]> {
+    const raw = await send("/approvals/grants", { method: "GET", ...(signal === undefined ? {} : { signal }) });
+    return decodeGrantList(raw);
+  },
+
+  /** Withdrawing one takes effect on the next request that would have matched. */
+  async revokeGrant(id: string, signal?: AbortSignal): Promise<void> {
+    await send(`/approvals/grants/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal === undefined ? {} : { signal }) });
   },
 
   /* --------------------------------------------------------------- health */

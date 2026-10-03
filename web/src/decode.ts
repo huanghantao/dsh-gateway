@@ -12,6 +12,18 @@
 
 import type {
   Approval,
+  ApprovalGrant,
+  ApprovalGranted,
+  ChangedFile,
+  ChangeHunk,
+  ChangesSummary,
+  DeploymentLimits,
+  Features,
+  Principal,
+  RevertReport,
+  RevertResult,
+  SessionChanges,
+  Turn,
   ApprovalOption,
   ApprovalResolved,
   Device,
@@ -232,6 +244,32 @@ export function decodeModels(value: unknown): ModelsResponse {
   };
 }
 
+const TURN_STATES: readonly TurnStatus[] = ["queued", "running", "completed", "cancelled", "failed"];
+
+/**
+ * Decodes one admitted prompt.
+ *
+ * `position` and `startedAt` are absent on the wire depending on the state, and
+ * a client that guessed them would show a queued prompt as running or a running
+ * one as first in a queue that does not exist.
+ */
+export function decodeTurn(value: unknown): Turn | null {
+  if (!isRecord(value)) return null;
+  const turnId = asStringOrNull(field(value, "turnId"));
+  if (turnId === null) return null;
+  return {
+    turnId,
+    state: asEnum(field(value, "state"), TURN_STATES, "failed"),
+    position: asNumber(field(value, "position"), 0),
+    queuedAt: asString(field(value, "queuedAt"), ""),
+    startedAt: asStringOrNull(field(value, "startedAt")),
+    // Absent on the session resource, where a turn is running and has not
+    // stopped; present on the event that reports it settling.
+    stopReason: asStringOrNull(field(value, "stopReason")),
+    detail: asStringOrNull(field(value, "detail")),
+  };
+}
+
 export function decodeSession(value: unknown): Session | null {
   if (!isRecord(value)) return null;
   const id = asStringOrNull(field(value, "id"));
@@ -251,6 +289,10 @@ export function decodeSession(value: unknown): Session | null {
     archived: asBoolean(field(value, "archived"), false),
     archivedOnDesk: asBoolean(field(value, "archivedOnDesk"), false),
     pinned: asBoolean(field(value, "pinned"), false),
+    turn: decodeTurn(field(value, "turn")),
+    queue: asArray(field(value, "queue"))
+      .map(decodeTurn)
+      .filter((t): t is Turn => t !== null),
   };
 }
 
@@ -324,6 +366,7 @@ export function decodeTranscriptSearch(value: unknown): TranscriptSearch {
         seq: asNumber(field(entry, "seq"), 0),
         role: asString(field(entry, "role"), ""),
         tool: asString(field(entry, "tool"), ""),
+        field: asString(field(entry, "field"), ""),
         snippet: asString(field(entry, "snippet"), ""),
         time: asString(field(entry, "time"), ""),
         archived: field(entry, "archived") === true,
@@ -437,6 +480,7 @@ function decodeTranscriptItem(value: unknown): TranscriptItem | null {
     toolInput: asStringOrNull(field(value, "input")),
     toolOutput: asStringOrNull(field(value, "output")),
     isError: asBoolean(field(value, "isError"), false),
+    attachments: asNumber(field(value, "attachments"), 0),
   };
 }
 
@@ -456,7 +500,37 @@ function decodeApprovalOption(value: unknown): ApprovalOption | null {
   if (!isRecord(value)) return null;
   const id = asStringOrNull(field(value, "id"));
   if (id === null) return null;
-  return { id, name: asString(field(value, "name"), id) };
+  return {
+    id,
+    name: asString(field(value, "name"), id),
+    grant: asBoolean(field(value, "grant"), false),
+  };
+}
+
+/** Decodes a standing authorisation. */
+export function decodeGrant(value: unknown): ApprovalGrant | null {
+  if (!isRecord(value)) return null;
+  const id = asStringOrNull(field(value, "id"));
+  const sessionId = asStringOrNull(field(value, "sessionId"));
+  if (id === null || sessionId === null) return null;
+  return {
+    id,
+    sessionId,
+    tool: asString(field(value, "tool"), ""),
+    scope: asString(field(value, "scope"), "tool"),
+    summary: asString(field(value, "summary"), ""),
+    createdAt: asString(field(value, "createdAt"), ""),
+    expiresAt: asString(field(value, "expiresAt"), ""),
+    uses: asNumber(field(value, "uses"), 0),
+  };
+}
+
+/** Decodes the standing authorisations currently in force. */
+export function decodeGrantList(value: unknown): readonly ApprovalGrant[] {
+  if (!isRecord(value)) return [];
+  return asArray(field(value, "grants"))
+    .map(decodeGrant)
+    .filter((g): g is ApprovalGrant => g !== null);
 }
 
 function decodeApproval(value: unknown): Approval | null {
@@ -483,6 +557,142 @@ export function decodeApprovalList(value: unknown): readonly Approval[] {
   return asArray(field(value, "approvals"))
     .map(decodeApproval)
     .filter((a): a is Approval => a !== null);
+}
+
+/* --------------------------------------------------------------- changes */
+
+function decodeHunk(value: unknown): ChangeHunk | null {
+  if (!isRecord(value)) return null;
+  return {
+    seq: asNumber(field(value, "seq"), 0),
+    callId: asString(field(value, "callId"), ""),
+    tool: asString(field(value, "tool"), ""),
+    lines: asArray(field(value, "lines")).filter((line): line is string => typeof line === "string"),
+    added: asNumber(field(value, "added"), 0),
+    deleted: asNumber(field(value, "deleted"), 0),
+    wholeFile: asBoolean(field(value, "wholeFile"), false),
+    truncated: asBoolean(field(value, "truncated"), false),
+  };
+}
+
+function decodeChangedFile(value: unknown): ChangedFile | null {
+  if (!isRecord(value)) return null;
+  const path = asStringOrNull(field(value, "path"));
+  if (path === null) return null;
+  return {
+    path,
+    display: asString(field(value, "display"), path),
+    added: asNumber(field(value, "added"), 0),
+    deleted: asNumber(field(value, "deleted"), 0),
+    edits: asNumber(field(value, "edits"), 0),
+    writes: asNumber(field(value, "writes"), 0),
+    binary: asBoolean(field(value, "binary"), false),
+    hunks: asArray(field(value, "hunks"))
+      .map(decodeHunk)
+      .filter((h): h is ChangeHunk => h !== null),
+    truncated: asBoolean(field(value, "truncated"), false),
+    revertible: asBoolean(field(value, "revertible"), false),
+    reason: asString(field(value, "reason"), ""),
+  };
+}
+
+/** Decodes what a session changed. */
+export function decodeChanges(value: unknown): SessionChanges {
+  const source = isRecord(value) ? value : {};
+  const raw = isRecord(field(source, "summary")) ? (field(source, "summary") as Record<string, unknown>) : {};
+  const summary: ChangesSummary = {
+    files: asNumber(field(raw, "files"), 0),
+    total: asNumber(field(raw, "total"), 0),
+    added: asNumber(field(raw, "added"), 0),
+    deleted: asNumber(field(raw, "deleted"), 0),
+    edits: asNumber(field(raw, "edits"), 0),
+    source: asString(field(raw, "source"), ""),
+    truncated: asBoolean(field(raw, "truncated"), false),
+  };
+  return {
+    files: asArray(field(source, "files"))
+      .map(decodeChangedFile)
+      .filter((f): f is ChangedFile => f !== null),
+    summary,
+    revertEnabled: asBoolean(field(source, "revertEnabled"), false),
+    unsupported: asBoolean(field(source, "unsupported"), false),
+    detail: asString(field(source, "detail"), ""),
+  };
+}
+
+/** Decodes the per-file report an undo answers with. */
+export function decodeRevertReport(value: unknown): RevertReport {
+  const source = isRecord(value) ? value : {};
+  const files = asArray(field(source, "files"))
+    .map((entry): RevertResult | null => {
+      if (!isRecord(entry)) return null;
+      const path = asStringOrNull(field(entry, "path"));
+      if (path === null) return null;
+      return {
+        path,
+        display: asString(field(entry, "display"), path),
+        status: asEnum(field(entry, "status"), ["reverted", "skipped", "refused"] as const, "refused"),
+        replacements: asNumber(field(entry, "replacements"), 0),
+        reason: asString(field(entry, "reason"), ""),
+      };
+    })
+    .filter((f): f is RevertResult => f !== null);
+  return {
+    files,
+    reverted: asNumber(field(source, "reverted"), 0),
+    refused: asNumber(field(source, "refused"), 0),
+    skipped: asNumber(field(source, "skipped"), 0),
+  };
+}
+
+/* ------------------------------------------------------------ deployment */
+
+const NOTHING: Principal = {
+  device: { id: "", name: "", createdAt: "", expiresAt: "" },
+  features: {
+    transcript: false,
+    desktopUI: false,
+    imagePrompts: false,
+    approvalTimeoutSecs: 0,
+    sessionIdleTimeoutSec: 0,
+    approvalGrantTTLSecs: 0,
+    promptQueueDepth: 0,
+    revertEnabled: false,
+  },
+  limits: { maxPromptBytes: 0, maxBodyBytes: 0, maxImageBytes: 0, transcriptPage: 0 },
+};
+
+/**
+ * Decodes `GET /me`.
+ *
+ * Every optional surface defaults to off. A client that assumed a capability
+ * because the field was missing would offer a control that fails, which is
+ * exactly the failure this payload exists to prevent.
+ */
+export function decodePrincipal(value: unknown): Principal {
+  if (!isRecord(value)) return NOTHING;
+  const device = decodeDevice(value);
+  if (device === null) return NOTHING;
+
+  const rawFeatures = isRecord(field(value, "features")) ? (field(value, "features") as Record<string, unknown>) : {};
+  const rawLimits = isRecord(field(value, "limits")) ? (field(value, "limits") as Record<string, unknown>) : {};
+  const features: Features = {
+    transcript: asBoolean(field(rawFeatures, "transcript"), false),
+    desktopUI: asBoolean(field(rawFeatures, "desktopUI"), false),
+    imagePrompts: asBoolean(field(rawFeatures, "imagePrompts"), false),
+    approvalTimeoutSecs: asNumber(field(rawFeatures, "approvalTimeoutSecs"), 0),
+    sessionIdleTimeoutSec: asNumber(field(rawFeatures, "sessionIdleTimeoutSec"), 0),
+    approvalGrantTTLSecs: asNumber(field(rawFeatures, "approvalGrantTTLSecs"), 0),
+    promptQueueDepth: asNumber(field(rawFeatures, "promptQueueDepth"), 0),
+    revertEnabled: asBoolean(field(rawFeatures, "revertEnabled"), false),
+  };
+  const limits: DeploymentLimits = {
+    maxPromptBytes: asNumber(field(rawLimits, "maxPromptBytes"), 0),
+    maxBodyBytes: asNumber(field(rawLimits, "maxBodyBytes"), 0),
+    maxImageBytes: asNumber(field(rawLimits, "maxImageBytes"), 0),
+    transcriptPage: asNumber(field(rawLimits, "transcriptPage"), 0),
+  };
+  return { device, features, limits };
 }
 
 /* --------------------------------------------------------------- events */
@@ -537,14 +747,18 @@ function decodeTool(value: unknown): ToolData {
   };
 }
 
-const TURN_STATUSES: readonly TurnStatus[] = ["running", "completed", "cancelled", "failed"];
-
 function decodeTurnState(value: unknown): TurnStateData {
+  const turn = decodeTurn(value);
   const source = isRecord(value) ? value : {};
   return {
-    turnId: asString(field(source, "turnId"), ""),
-    state: asEnum(field(source, "state"), TURN_STATUSES, "failed"),
-    stopReason: asStringOrNull(field(source, "stopReason")),
+    turnId: turn?.turnId ?? "",
+    state: turn?.state ?? "failed",
+    position: turn?.position ?? 0,
+    queuedAt: turn?.queuedAt ?? "",
+    startedAt: turn?.startedAt ?? null,
+    stopReason: turn?.stopReason ?? null,
+    detail: turn?.detail ?? null,
+    queueDepth: asNumberOrNull(field(source, "queueDepth")),
   };
 }
 
@@ -621,8 +835,22 @@ export function decodeServerEvent(value: unknown): ServerEvent | null {
         id,
         optionId: asString(field(source, "optionId"), ""),
         decidedBy: asStringOrNull(field(source, "decidedBy")),
+        tool: asString(field(source, "tool"), ""),
+        sessionId: asString(field(source, "sessionId"), ""),
+        grantId: asStringOrNull(field(source, "grantId")),
       };
       return { ...envelope, type, data: resolved };
+    }
+    case "approval.granted": {
+      const source = isRecord(data) ? data : {};
+      const grant = decodeGrant(field(source, "grant"));
+      if (grant === null) return null;
+      const granted: ApprovalGranted = {
+        grant,
+        tool: asString(field(source, "tool"), ""),
+        input: asString(field(source, "input"), ""),
+      };
+      return { ...envelope, type, data: granted };
     }
     case "turn.state":
       return { ...envelope, type, data: decodeTurnState(data) };

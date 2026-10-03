@@ -30,24 +30,97 @@ import {
 } from "./feed.js";
 import { normalizePairingCode } from "./format.js";
 import type { ActiveSession, AppState, AppStore, Route } from "./store.js";
-import { withSession } from "./store.js";
+import { NO_FEATURES, NO_LIMITS, withSession } from "./store.js";
 import type {
   Approval,
+  ApprovalGranted,
+  ApprovalResolved,
   CurationDecision,
   ModelsResponse,
+  PromptBlock,
+  RevertReport,
   ServerEvent,
   Session,
+  SessionChanges,
+  SessionReceipt,
   TokenUsage,
   TranscriptItem,
-  SessionReceipt,
   TranscriptSearch,
   TrashEntry,
   TriageReport,
+  Turn,
+  TurnStateData,
   Workspace,
 } from "./types.js";
 
 const NOTICE_MS = 4000;
 const SESSION_PAGE_SIZE = 30;
+
+/** One line about a prompt waiting behind the turn in flight. */
+function queuedNotice(turn: Turn): string {
+  const place = turn.position > 0 ? ` (${turn.position} in line)` : "";
+  return `Queued${place}. It runs when the turn in flight finishes.`;
+}
+
+/** One line about a turn that has settled, in the operator's terms. */
+function settleNotice(turn: TurnStateData): string {
+  switch (turn.state) {
+    case "failed":
+      return turn.detail ?? turn.stopReason ?? "The turn failed.";
+    case "cancelled":
+      return "The turn was stopped.";
+    default:
+      return "The turn finished.";
+  }
+}
+
+/** One line about an approval nobody answered. */
+function refusedNotice(decision: ApprovalResolved): string {
+  const tool = decision.tool === "" ? "The tool" : decision.tool;
+  return `${tool} was refused: nobody answered the approval in time.`;
+}
+
+/** One line about a tool a standing grant authorised. */
+function grantedNotice(granted: ApprovalGranted): string {
+  const tool = granted.tool === "" ? "A tool" : granted.tool;
+  const scope = granted.grant.scope === "exact" ? "this exact call" : `${tool} in this session`;
+  return `Auto-approved by your standing grant: ${scope}.`;
+}
+
+/** Inserts or replaces a queued turn, keeping the queue in position order. */
+function upsertQueued(queue: readonly Turn[], turn: TurnStateData): readonly Turn[] {
+  const next = queue.filter((item) => item.turnId !== turn.turnId);
+  next.push(turn);
+  return next.slice().sort((a, b) => a.position - b.position);
+}
+
+/**
+ * One image on its way out.
+ *
+ * `data` is base64 with no `data:` prefix, which is what the contract carries.
+ * The app downscales and re-encodes before it gets here: a phone photograph is
+ * several megabytes, and a prompt that the gateway refuses for size is a worse
+ * outcome than one that arrives slightly softer.
+ */
+export interface OutgoingImage {
+  readonly mimeType: string;
+  readonly data: string;
+}
+
+/**
+ * Renders a composer's contents as prompt blocks.
+ *
+ * Text first, then images: a model reading a screenshot with a caption does
+ * better with the question before the picture, and it matches how the operator
+ * wrote it.
+ */
+export function promptBlocks(text: string, images: readonly OutgoingImage[]): readonly PromptBlock[] {
+  const blocks: PromptBlock[] = [];
+  const trimmed = text.trim();
+  if (trimmed !== "" || images.length === 0) blocks.push({ type: "text", text });
+  for (const image of images) blocks.push({ type: "image", mimeType: image.mimeType, data: image.data });
+  return blocks;
+}
 
 function emptyActive(sessionId: string): ActiveSession {
   return {
@@ -61,6 +134,7 @@ function emptyActive(sessionId: string): ActiveSession {
     loadingOlder: false,
     usage: null,
     turn: null,
+    queue: [],
     promptError: null,
     releaseError: null,
     releasing: false,
@@ -80,6 +154,11 @@ export interface Ctx {
   loadModels(): Promise<void>;
   loadDevices(): Promise<void>;
   loadApprovals(): Promise<void>;
+  dropQueued(turnId: string): Promise<void>;
+  changes(sessionId: string): Promise<SessionChanges>;
+  revert(sessionId: string, paths: readonly string[]): Promise<RevertReport>;
+  loadGrants(): Promise<void>;
+  revokeGrant(id: string): Promise<void>;
   refresh(): Promise<void>;
 
   searchSessions(query: string): Promise<void>;
@@ -95,7 +174,13 @@ export interface Ctx {
   openSession(id: string): Promise<void>;
   closeSession(): void;
   loadOlder(): Promise<void>;
-  sendPrompt(text: string): Promise<void>;
+  /**
+   * Sends a prompt, optionally with images.
+   *
+   * A prompt that arrives while a turn is running is queued rather than
+   * refused; the ticket is what says which happened.
+   */
+  sendPrompt(text: string, images?: readonly OutgoingImage[]): Promise<void>;
   cancelTurn(): Promise<void>;
   releaseSession(): Promise<void>;
 
@@ -156,10 +241,14 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         bootError: null,
         route: code === undefined ? { kind: "pair" } : { kind: "pair", code },
         principal: null,
+        features: NO_FEATURES,
+        limits: NO_LIMITS,
         sessions: [],
         sessionsCursor: null,
         devices: [],
         approvals: [],
+        grants: [],
+        grantsError: null,
         active: null,
         connection: "closed",
         connectionDetail: null,
@@ -271,6 +360,77 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     } catch (error) {
       const message = fail(error, "Could not load pending approvals.");
       if (message !== "") store.patch({ approvalError: message });
+    }
+  };
+
+  /**
+   * Loads the standing authorisations currently in force.
+   *
+   * Fetched on demand rather than held in sync from events: a grant list is
+   * something an operator opens deliberately, and a view that has to stay
+   * current with `approval.granted` frames would be more machinery than the
+   * answer is worth.
+   */
+  /**
+   * Drops one prompt waiting behind the turn in flight.
+   *
+   * Local first, then confirmed by the server: the queue strip is a live view of
+   * a list the gateway owns, and the `turn.state` frame it republishes is what
+   * actually settles the row.
+   */
+  const dropQueued = async (turnId: string): Promise<void> => {
+    const active = store.state.active;
+    if (active === null) return;
+    try {
+      await api.dropQueued(active.sessionId, turnId);
+      store.set((state) => {
+        const current = state.active;
+        if (current === null) return state;
+        return { ...state, active: { ...current, queue: current.queue.filter((item) => item.turnId !== turnId) } };
+      });
+    } catch (error) {
+      const message = fail(error, "That waiting prompt could not be dropped.");
+      if (message !== "") store.patch({ notice: message });
+    }
+  };
+
+  /**
+   * What a session changed.
+   *
+   * Unlike the other loaders this one does not write to the store: the answer
+   * belongs to a sheet that is open for a moment, and putting a page of file
+   * hunks in global state would keep it alive long after the reader closed it.
+   * It throws rather than reporting through `state`, so the caller that owns the
+   * screen owns the message — which is what the sheet's own error path expects.
+   */
+  const changes = async (sessionId: string): Promise<SessionChanges> => api.changes(sessionId);
+
+  /**
+   * Undoes recorded changes, and answers with a per-file report.
+   *
+   * Deliberately not a silent success: the caller renders which files came back
+   * and which did not, because there is no transaction and a half-undone tree
+   * needs to be looked at rather than assumed.
+   */
+  const revert = async (sessionId: string, paths: readonly string[]): Promise<RevertReport> => api.revert(sessionId, paths);
+
+  const loadGrants = async (): Promise<void> => {
+    try {
+      const grants = await api.grants();
+      store.set((state) => ({ ...state, grants }));
+    } catch (error) {
+      const message = fail(error, "Could not load standing approvals.");
+      if (message !== "") store.patch({ grantsError: message });
+    }
+  };
+
+  const revokeGrant = async (id: string): Promise<void> => {
+    try {
+      await api.revokeGrant(id);
+      store.set((state) => ({ ...state, grants: state.grants.filter((grant) => grant.id !== id) }));
+    } catch (error) {
+      const message = fail(error, "That authorisation could not be withdrawn.");
+      if (message !== "") store.patch({ grantsError: message });
     }
   };
 
@@ -438,7 +598,15 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     }
   };
 
-  const sendPrompt = async (text: string): Promise<void> => {
+  /**
+   * Sends a prompt.
+   *
+   * `images` travel as blocks beside the text. The gateway queues the prompt if
+   * a turn is already running, and the ticket it answers with says which
+   * happened — so the row appears immediately with its real state rather than an
+   * optimistic "running" the server may not have agreed to.
+   */
+  const sendPrompt = async (text: string, images: readonly OutgoingImage[] = []): Promise<void> => {
     const active = currentActive();
     if (active === null) return;
     const sessionId = active.sessionId;
@@ -447,26 +615,33 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
       return current === null ? state : { ...state, active: { ...current, promptError: null } };
     });
     try {
-      await api.prompt(sessionId, text);
+      const ticket = await api.prompt(sessionId, promptBlocks(text, images));
       // The contract only echoes assistant messages, so the user's own turn is
       // appended here — after the server accepted it, never optimistically.
       store.set((state) => {
         const current = state.active;
         if (current === null || current.sessionId !== sessionId) return state;
-        return {
-          ...state,
-          active: {
-            ...current,
-            feed: appendUserMessage(current.feed, text, new Date().toISOString()),
-            turn: current.turn ?? { turnId: "", state: "running", stopReason: null },
-          },
-        };
+        const at = new Date().toISOString();
+        let feed = appendUserMessage(current.feed, text, at, images.length);
+        let turn = current.turn;
+        let queue = current.queue;
+        if (ticket.state === "queued") {
+          // Said in the transcript, not only in the header: the row the operator
+          // just added is where they will look to find out what happened to it.
+          feed = appendNotice(feed, queuedNotice(ticket), at, 0);
+          queue = upsertQueued(queue, { ...ticket, queueDepth: null });
+        } else {
+          turn = ticket;
+        }
+        return { ...state, active: { ...current, feed, turn, queue } };
       });
     } catch (error) {
       const message =
         error instanceof ApiError && error.is(ERROR_CODES.promptInFlight)
           ? "This session is already running a turn. Stop it first, or wait for it to finish."
-          : fail(error, "The prompt could not be sent.");
+          : error instanceof ApiError && error.is(ERROR_CODES.queueFull)
+            ? "This session already has as many prompts waiting as it allows. Wait for one to run, or stop the turn."
+            : fail(error, "The prompt could not be sent.");
       if (message !== "") {
         store.set((state) => {
           const current = state.active;
@@ -698,21 +873,74 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
       }
 
       case "approval.resolved": {
-        const resolvedId = event.data.id;
-        store.set((state) => ({ ...state, approvals: state.approvals.filter((item) => item.id !== resolvedId) }));
+        const decision = event.data;
+        store.set((state) => {
+          const approvals = state.approvals.filter((item) => item.id !== decision.id);
+          // A decision nobody made is the case the product used to lose: the
+          // operator who missed the notification came back to a session that had
+          // carried on without the tool and no record of why.
+          const refused = decision.decidedBy === "timeout" || decision.decidedBy === "shutdown";
+          const active = state.active;
+          if (!refused || active === null || (decision.sessionId !== "" && active.sessionId !== decision.sessionId)) {
+            return { ...state, approvals };
+          }
+          return { ...state, approvals, active: { ...active, feed: appendNotice(active.feed, refusedNotice(decision), event.time, event.seq) } };
+        });
+        return;
+      }
+
+      case "approval.granted": {
+        // A tool ran without anyone answering *this* prompt, because a decision
+        // they made earlier applied. It belongs in the transcript: otherwise the
+        // only evidence is a tool card with no approval beside it.
+        const granted = event.data;
+        store.set((state) => {
+          const active = state.active;
+          if (active === null || (event.sessionId !== null && active.sessionId !== event.sessionId)) return state;
+          const feed = appendNotice(active.feed, grantedNotice(granted), event.time, event.seq);
+          return { ...state, active: { ...active, feed } };
+        });
         return;
       }
 
       case "turn.state": {
+        // Three cases, not one. A queued prompt is not the running one; a
+        // running one may be a queued prompt being promoted; and a settled one
+        // has to leave the header *and* the queue, because the server will send
+        // a separate `running` frame for whatever it promotes next.
         const sessionId = event.sessionId;
+        const turn = event.data;
         store.set((state) => {
           const active = state.active;
           if (active === null || (sessionId !== null && active.sessionId !== sessionId)) return state;
-          const feed =
-            event.data.state === "failed"
-              ? appendNotice(active.feed, event.data.stopReason ?? "The turn failed.", event.time, event.seq)
-              : active.feed;
-          return { ...state, active: { ...active, turn: event.data, promptError: null, feed } };
+          const without = active.queue.filter((item) => item.turnId !== turn.turnId);
+
+          switch (turn.state) {
+            case "queued":
+              return { ...state, active: { ...active, queue: upsertQueued(active.queue, turn), promptError: null } };
+
+            case "running":
+              return {
+                ...state,
+                active: { ...active, turn, queue: without, promptError: null },
+              };
+
+            default: {
+              const feed = appendNotice(active.feed, settleNotice(turn), event.time, event.seq);
+              return {
+                ...state,
+                active: {
+                  ...active,
+                  // Only the turn that is actually in flight is cleared: a stale
+                  // `completed` for an older turn must not blank a newer one.
+                  turn: active.turn?.turnId === turn.turnId ? null : active.turn,
+                  queue: without,
+                  promptError: null,
+                  feed,
+                },
+              };
+            }
+          }
         });
         return;
       }
@@ -727,7 +955,14 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     store.patch({ boot: "starting", bootError: null });
     try {
       const principal = await api.me();
-      store.set((state) => ({ ...state, boot: "ready", bootError: null, principal }));
+      store.set((state) => ({
+        ...state,
+        boot: "ready",
+        bootError: null,
+        principal: principal.device,
+        features: principal.features,
+        limits: principal.limits,
+      }));
 
       // wake(), not connect().
       //
@@ -785,6 +1020,11 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     loadModels,
     loadDevices,
     loadApprovals,
+    dropQueued,
+    changes,
+    revert,
+    loadGrants,
+    revokeGrant,
     refresh,
     openSession,
     closeSession,

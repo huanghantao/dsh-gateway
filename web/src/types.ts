@@ -86,6 +86,31 @@ export interface ModelsResponse {
 
 /* ----------------------------------------------------------------- sessions */
 
+/**
+ * One admitted prompt.
+ *
+ * The same shape describes a turn on the session resource and a turn in a
+ * `turn.state` event. That is deliberate: they are the same thing seen at
+ * different moments, and two types would mean two decoders and a conversion
+ * somewhere in the middle that could disagree with the server.
+ *
+ * `state` says whether it is running or waiting, and `position` is its 1-based
+ * place in the queue while it waits. The gateway republishes a turn whenever the
+ * queue moves, so a follow-up creeping to the front needs no polling.
+ *
+ * `stopReason` and `detail` are only ever set on the settled event; the session
+ * resource carries `null`, because a running turn has not stopped yet.
+ */
+export interface Turn {
+  readonly turnId: string;
+  readonly state: TurnStatus;
+  readonly position: number;
+  readonly queuedAt: string;
+  readonly startedAt: string | null;
+  readonly stopReason: string | null;
+  readonly detail: string | null;
+}
+
 export interface Session {
   readonly id: string;
   readonly title: string;
@@ -110,6 +135,15 @@ export interface Session {
   /** The desktop is the reason it is archived, so the phone cannot undo it alone. */
   readonly archivedOnDesk: boolean;
   readonly pinned: boolean;
+  /**
+   * The turn running in this session right now, when this gateway is the one
+   * running it. It carries `startedAt`, which is what a client that reconnects
+   * mid-turn ticks an elapsed timer from — the event that announced the turn may
+   * be long past the replay window.
+   */
+  readonly turn: Turn | null;
+  /** Prompts waiting behind `turn`, oldest first. */
+  readonly queue: readonly Turn[];
 }
 
 /* ---------------------------------------------------------- notifications */
@@ -194,6 +228,14 @@ export interface TranscriptMatch {
   readonly role: string;
   readonly tool: string;
   readonly snippet: string;
+  /**
+   * Which part of the row matched: "text", "tool", "input" or "output".
+   *
+   * It matters because a hit in tool output answers "which session printed
+   * this", and a result list that did not distinguish it from something the
+   * operator typed would send them looking in the wrong place.
+   */
+  readonly field: string;
   readonly time: string;
   readonly archived: boolean;
 }
@@ -284,18 +326,23 @@ export interface TokenUsage {
   readonly contextWindow: number | null;
 }
 
-export interface PromptBlock {
-  readonly type: "text";
-  readonly text: string;
-}
+/**
+ * One element of a prompt.
+ *
+ * `data` is base64 because that is what a JSON body carries. The app downscales
+ * and re-encodes before sending: a phone photograph is several megabytes, and
+ * the gateway's limit is a per-image policy rather than a target.
+ */
+export type PromptBlock =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "image"; readonly mimeType: string; readonly data: string };
 
 export interface PromptRequest {
   readonly blocks: readonly PromptBlock[];
 }
 
-export interface PromptResponse {
-  readonly turnId: string;
-}
+/** The ticket the gateway answers a prompt with. */
+export type PromptResponse = Turn;
 
 /* --------------------------------------------------------------- transcript */
 
@@ -316,6 +363,12 @@ export interface TranscriptItem {
   readonly toolInput: string | null;
   readonly toolOutput: string | null;
   readonly isError: boolean;
+  /**
+   * How many non-text blocks the message carried. The image itself is not in
+   * the projection — see the contract — so a row shows that something was
+   * attached rather than pretending the words were the whole message.
+   */
+  readonly attachments: number;
 }
 
 export interface TranscriptResponse {
@@ -335,6 +388,34 @@ export interface TranscriptResponse {
 export interface ApprovalOption {
   readonly id: string;
   readonly name: string;
+  /**
+   * True for a scoped choice this gateway synthesised — "allow this tool in
+   * this session", "allow this exact call" — as opposed to the harness's own
+   * allow-once and reject-once.
+   */
+  readonly grant: boolean;
+}
+
+/**
+ * A standing authorisation: a scope a person agreed to once, and when it stops
+ * applying.
+ *
+ * It is a resource rather than a detail of the sheet, because an authorisation
+ * that is in force has to be visible somewhere — otherwise the only way to know
+ * one exists is to remember giving it.
+ */
+export interface ApprovalGrant {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly tool: string;
+  /** "tool" for every invocation, "exact" for one identical call. */
+  readonly scope: string;
+  /** A reminder of what was agreed to, for an exact grant. */
+  readonly summary: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  /** How many requests this grant has answered. */
+  readonly uses: number;
 }
 
 export interface Approval {
@@ -356,7 +437,23 @@ export interface ApprovalDecision {
 export interface ApprovalResolved {
   readonly id: string;
   readonly optionId: string;
+  /**
+   * Who answered. "operator" means a person did; "timeout" and "shutdown" mean
+   * the tool was refused because nobody did, which a reader must be able to tell
+   * apart.
+   */
   readonly decidedBy: string | null;
+  readonly tool: string;
+  readonly sessionId: string;
+  /** Set when a standing grant, rather than a person, answered. */
+  readonly grantId: string | null;
+}
+
+/** A request answered from a standing grant instead of by a prompt. */
+export interface ApprovalGranted {
+  readonly grant: ApprovalGrant;
+  readonly tool: string;
+  readonly input: string;
 }
 
 /* ------------------------------------------------------------------- events */
@@ -404,12 +501,17 @@ export interface ToolData {
   readonly isError: boolean;
 }
 
-export type TurnStatus = "running" | "completed" | "cancelled" | "failed";
+export type TurnStatus = "queued" | "running" | "completed" | "cancelled" | "failed";
 
-export interface TurnStateData {
-  readonly turnId: string;
-  readonly state: TurnStatus;
-  readonly stopReason: string | null;
+/**
+ * The `turn.state` payload.
+ *
+ * `queueDepth` is the one field the session resource does not carry — it is a
+ * fact about the moment, and a client that fetched the session would get the
+ * live count from `queue` anyway.
+ */
+export interface TurnStateData extends Turn {
+  readonly queueDepth: number | null;
 }
 
 export type HarnessStatus = "starting" | "ready" | "restarting" | "failed";
@@ -433,11 +535,127 @@ export type ServerEvent =
   | (EventEnvelope & { readonly type: "usage.update"; readonly data: TokenUsage })
   | (EventEnvelope & { readonly type: "approval.requested"; readonly data: Approval })
   | (EventEnvelope & { readonly type: "approval.resolved"; readonly data: ApprovalResolved })
+  | (EventEnvelope & { readonly type: "approval.granted"; readonly data: ApprovalGranted })
   | (EventEnvelope & { readonly type: "turn.state"; readonly data: TurnStateData })
   | (EventEnvelope & { readonly type: "harness.state"; readonly data: HarnessStateData })
   | (EventEnvelope & { readonly type: "resync"; readonly data: null });
 
 export type ServerEventType = ServerEvent["type"];
+
+/* ------------------------------------------------------------------ changes */
+
+/**
+ * One hunk of a recorded change, as unified-diff lines.
+ *
+ * There are no line numbers: the session log records what an edit replaced, not
+ * where in the file it landed. `lines` are prefixed with "+", "-" or a space.
+ */
+export interface ChangeHunk {
+  readonly seq: number;
+  readonly callId: string;
+  readonly tool: string;
+  readonly lines: readonly string[];
+  readonly added: number;
+  readonly deleted: number;
+  /** A write whose previous contents the log does not record. All additions. */
+  readonly wholeFile: boolean;
+  readonly truncated: boolean;
+}
+
+/** One file the session changed. */
+export interface ChangedFile {
+  readonly path: string;
+  /** The path as a reader thinks of it: relative to the session's workspace. */
+  readonly display: string;
+  readonly added: number;
+  readonly deleted: number;
+  readonly edits: number;
+  readonly writes: number;
+  readonly binary: boolean;
+  readonly hunks: readonly ChangeHunk[];
+  readonly truncated: boolean;
+  /**
+   * Whether an undo is offered *and* possible. False when the deployment has
+   * undo switched off, or when the log does not record enough to reverse this
+   * file — `reason` says which.
+   */
+  readonly revertible: boolean;
+  readonly reason: string;
+}
+
+export interface ChangesSummary {
+  readonly files: number;
+  readonly total: number;
+  readonly added: number;
+  readonly deleted: number;
+  readonly edits: number;
+  /** Where the projection came from. "tool-calls" today. */
+  readonly source: string;
+  readonly truncated: boolean;
+}
+
+export interface SessionChanges {
+  readonly files: readonly ChangedFile[];
+  readonly summary: ChangesSummary;
+  readonly revertEnabled: boolean;
+  /** True when the log is newer than the gateway understands. */
+  readonly unsupported: boolean;
+  readonly detail: string;
+}
+
+export type RevertOutcome = "reverted" | "skipped" | "refused";
+
+export interface RevertResult {
+  readonly path: string;
+  readonly display: string;
+  readonly status: RevertOutcome;
+  readonly replacements: number;
+  readonly reason: string;
+}
+
+export interface RevertReport {
+  readonly files: readonly RevertResult[];
+  readonly reverted: number;
+  readonly refused: number;
+  readonly skipped: number;
+}
+
+/* -------------------------------------------------------------- deployment */
+
+/**
+ * What this gateway can do, so a client does not have to probe and fail.
+ *
+ * Every optional surface is named here: a composer that offers an attach button
+ * on a harness that cannot take images is a button that produces an error, and
+ * a revert control on a read-only deployment offers an action that cannot
+ * happen.
+ */
+export interface Features {
+  readonly transcript: boolean;
+  readonly desktopUI: boolean;
+  readonly imagePrompts: boolean;
+  readonly approvalTimeoutSecs: number;
+  readonly sessionIdleTimeoutSec: number;
+  /** Zero means scoped approvals are off and must not be offered. */
+  readonly approvalGrantTTLSecs: number;
+  /** Zero means a mid-turn prompt is refused rather than queued. */
+  readonly promptQueueDepth: number;
+  readonly revertEnabled: boolean;
+}
+
+export interface DeploymentLimits {
+  readonly maxPromptBytes: number;
+  readonly maxBodyBytes: number;
+  readonly maxImageBytes: number;
+  readonly transcriptPage: number;
+}
+
+/** `GET /me`: who this device is, and what the deployment offers. */
+export interface Principal {
+  readonly device: Device;
+  readonly features: Features;
+  readonly limits: DeploymentLimits;
+}
 
 /* ------------------------------------------------------------------- health */
 
@@ -460,6 +678,8 @@ export type FeedItem =
       readonly thinking: string | null;
       readonly model: string | null;
       readonly usage: TokenUsage | null;
+      /** Non-text blocks the message carried. See TranscriptItem.attachments. */
+      readonly attachments: number;
     }
   | {
       readonly key: string;

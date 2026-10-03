@@ -21,7 +21,32 @@
  *   changed, which is what keeps the conversation's per-frame work O(appended).
  */
 
-import type { Approval, Device, FeedItem, HarnessStateData, ModelsResponse, Session, TokenUsage, TurnStateData, Workspace } from "./types.js";
+import type { Approval, ApprovalGrant, DeploymentLimits, Device, Features, FeedItem, HarnessStateData, ModelsResponse, Session, TokenUsage, Turn, Workspace } from "./types.js";
+
+/**
+ * What a gateway that has not answered `GET /me` yet can do: nothing optional.
+ *
+ * The defaults live here rather than in each view so that "unknown" and "off"
+ * are the same thing everywhere — a control that appears for a moment and then
+ * disappears once the truth arrives is worse than one that arrives with it.
+ */
+export const NO_FEATURES: Features = {
+  transcript: false,
+  desktopUI: false,
+  imagePrompts: false,
+  approvalTimeoutSecs: 0,
+  sessionIdleTimeoutSec: 0,
+  approvalGrantTTLSecs: 0,
+  promptQueueDepth: 0,
+  revertEnabled: false,
+};
+
+export const NO_LIMITS: DeploymentLimits = {
+  maxPromptBytes: 256 * 1024,
+  maxBodyBytes: 0,
+  maxImageBytes: 0,
+  transcriptPage: 0,
+};
 import { decodeModels } from "./decode.js";
 
 export type Listener = () => void;
@@ -57,7 +82,14 @@ export interface ActiveSession {
   readonly nextBefore: number | null;
   readonly loadingOlder: boolean;
   readonly usage: TokenUsage | null;
-  readonly turn: TurnStateData | null;
+  /**
+   * The turn in flight. Typed as the narrow `Turn` rather than the event
+   * payload, because it can arrive from either the session resource or an
+   * event, and the extra field an event carries is not something a view needs.
+   */
+  readonly turn: Turn | null;
+  /** Prompts waiting behind `turn`, as the server last reported them. */
+  readonly queue: readonly Turn[];
   readonly promptError: string | null;
   readonly releaseError: string | null;
   readonly releasing: boolean;
@@ -73,6 +105,13 @@ export interface AppState {
   readonly offline: boolean;
   readonly harness: HarnessStateData;
   readonly principal: Device | null;
+  /**
+   * What this deployment offers. Held beside the principal rather than inside
+   * it: the device is who you are, these are what the gateway can do, and a
+   * view that reads one almost never wants the other.
+   */
+  readonly features: Features;
+  readonly limits: DeploymentLimits;
 
   readonly sessions: readonly Session[];
   /** Opaque cursor from the last `GET /sessions`; `null` means the end. */
@@ -98,6 +137,9 @@ export interface AppState {
   readonly devicesError: string | null;
 
   readonly approvals: readonly Approval[];
+  /** Standing authorisations, loaded on demand for the approvals screen. */
+  readonly grants: readonly ApprovalGrant[];
+  readonly grantsError: string | null;
   readonly approvalBusyId: string | null;
   readonly approvalError: string | null;
 
@@ -179,6 +221,10 @@ function createAppState(): AppState {
     offline: typeof navigator !== "undefined" && navigator.onLine === false,
     harness: { state: "starting", detail: null },
     principal: null,
+    grants: [],
+    grantsError: null,
+    features: NO_FEATURES,
+    limits: NO_LIMITS,
     sessions: [],
     sessionsCursor: null,
     sessionsLoading: false,

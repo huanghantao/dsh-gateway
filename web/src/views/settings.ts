@@ -18,8 +18,8 @@
 import { ApiError, api } from "../api.js";
 import type { Ctx } from "../actions.js";
 import { el, on } from "../dom.js";
-import { catalogModelValue, effortLabel, formatDateTime, modelLabel, offeredValue, relativeTime } from "../format.js";
-import type { Readiness } from "../types.js";
+import { catalogModelValue, effortLabel, formatDateTime, formatDuration, modelLabel, offeredValue, relativeTime } from "../format.js";
+import type { ApprovalGrant, Readiness } from "../types.js";
 import { describePush, disablePush, enablePush, sendTestNotification, type PushState } from "../notifications.js";
 import { badge, openSheet, selectField } from "./ui.js";
 
@@ -39,6 +39,10 @@ export function mountSettings(root: HTMLElement, ctx: Ctx): () => void {
   let pickerTouched = false;
   let modelValue = "";
   let effortValue = "";
+
+  // Loaded once, on mount, rather than from `render`: a subscription that
+  // fetched on every store change would fetch on the fetch's own result.
+  if (ctx.store.state.features.approvalGrantTTLSecs > 0) void ctx.loadGrants();
 
   const checkHealth = async (): Promise<void> => {
     healthChecked = false;
@@ -454,6 +458,97 @@ export function mountSettings(root: HTMLElement, ctx: Ctx): () => void {
     return `Notifications also go to ${names}, which works on this phone regardless of the browser.`;
   }
 
+  /**
+   * The standing approvals that are currently answering prompts without asking.
+   *
+   * Rendered only when the deployment offers scoped grants. An authorisation in
+   * force has to be visible somewhere: the only other way to know one exists is
+   * to remember giving it, on a phone, possibly days ago — and its whole safety
+   * argument is that it is bounded and can be withdrawn.
+   */
+  function grantsSection(): HTMLElement | null {
+    const state = ctx.store.state;
+    if (state.features.approvalGrantTTLSecs <= 0) return null;
+
+    const body = el("div", { class: "stack" });
+    const list = el("div", { class: "grant-list" });
+
+    const paint = (): void => {
+      const current = ctx.store.state;
+      const error = current.grantsError;
+      if (error !== null) {
+        list.replaceChildren(el("p", { class: "alert alert-error", attrs: { role: "alert" }, text: error }));
+        return;
+      }
+      if (current.grants.length === 0) {
+        list.replaceChildren(
+          el("p", {
+            class: "muted",
+            text: "None. Every tool call waits for you, which is the default.",
+          }),
+        );
+        return;
+      }
+      list.replaceChildren(...current.grants.map((grant) => grantRow(grant)));
+    };
+
+    const grantRow = (grant: ApprovalGrant): HTMLElement => {
+      const scope =
+        grant.scope === "exact"
+          ? `this exact call${grant.summary === "" ? "" : `: ${grant.summary}`}`
+          : `any ${grant.tool}`;
+      return el(
+        "div",
+        { class: "grant-row" },
+        el(
+          "div",
+          { class: "grant-main" },
+          el("span", { class: "grant-tool", text: grant.tool }),
+          el("span", { class: "grant-scope", text: scope }),
+          el("span", {
+            class: "grant-expiry",
+            text: `expires ${relativeTime(grant.expiresAt)} · used ${grant.uses}×`,
+          }),
+        ),
+        el("button", {
+          class: "btn btn-ghost",
+          attrs: { type: "button" },
+          text: "Withdraw",
+          on: {
+            click: () => {
+              void ctx.revokeGrant(grant.id);
+            },
+          },
+        }),
+      );
+    };
+
+    const refresh = el("button", {
+      class: "btn btn-ghost btn-block",
+      attrs: { type: "button" },
+      text: "Refresh",
+      on: {
+        click: () => {
+          void ctx.loadGrants();
+        },
+      },
+    });
+
+    body.appendChild(
+      el("p", {
+        class: "muted",
+        text:
+          "A decision you made with a scope attached, still applying. Each one is limited to a single session, " +
+          `lasts ${formatDuration(state.features.approvalGrantTTLSecs)}, and can be withdrawn here at any time.`,
+      }),
+    );
+    body.appendChild(list);
+    body.appendChild(refresh);
+    paint();
+
+    return el("section", { class: "card" }, el("h2", { class: "card-title", text: "Standing approvals" }), body);
+  }
+
   function accountSection(): HTMLElement {
     const state = ctx.store.state;
     return el(
@@ -494,6 +589,7 @@ export function mountSettings(root: HTMLElement, ctx: Ctx): () => void {
       el("header", { class: "view-head" }, back, el("h1", { class: "view-title", text: "Settings" })),
       connectionSection(),
       notificationsSection(),
+      grantsSection(),
       modelSection(),
       devicesSection(),
       accountSection(),
