@@ -526,6 +526,19 @@ func (s *Server) handleResume(r *hostwire.Request) error {
 	if err := r.Decode(&params); err != nil {
 		return err
 	}
+	// A session this host already holds is already attached, and answering from
+	// the held handle is what makes a lost lease recoverable. Asking the child to
+	// resume it again would be refused — DSH permits one active attachment — and
+	// that refusal would reach the phone as "somebody else has it" when the
+	// somebody is this gateway: an expired lease, or a gateway that was
+	// redeployed, leaves the handle here on purpose (see handleRelease).
+	//
+	// The workspace is not re-checked against the handle. It is not a permission
+	// the caller can change: the handle's cwd is what DSH bound the session to,
+	// and this only reports it back.
+	if held := s.heldSession(params.SessionID); held != nil {
+		return r.Reply(hostwire.Session{Info: held.info}, nil)
+	}
 	sess, err := s.harness.ResumeSession(context.Background(), params.SessionID, params.Workspace)
 	if err != nil {
 		return err
@@ -914,6 +927,13 @@ func (s *Server) DrainAndWait(ctx context.Context, reason string) int {
 func (s *Server) cancelRunningIfIdle() {}
 
 /* --------------------------------------------------------------- bookkeeping */
+
+// heldSession returns the handle this host has for one session, if any.
+func (s *Server) heldSession(sessionID string) *session {
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	return s.sessions[sessionID]
+}
 
 // hold records a session this host has attached.
 func (s *Server) hold(sess harness.Session) {

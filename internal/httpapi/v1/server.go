@@ -43,6 +43,18 @@ type Follower interface {
 	Running(sessionID string) bool
 }
 
+// Held reports the sessions the harness is still holding a handle for.
+//
+// DSH's own listing cannot report them: `session/list` skips every session that
+// is live in the process answering it, and the child the gateway drives is that
+// process. A lease covers the gap while a phone is attached; what is left over
+// is the session whose lease went away without the attachment going away — an
+// expired lease, or a gateway redeploy — which is exactly the session an
+// operator is most likely to be looking for.
+type Held interface {
+	HeldSessions() []harness.SessionInfo
+}
+
 // Deps is everything the API needs. It is a struct rather than a long argument
 // list so that adding a service is a one-line change at the composition root.
 type Deps struct {
@@ -78,6 +90,9 @@ type Deps struct {
 	Workspace *workspace.Reverter
 	// Follower may be nil, in which case only leased sessions are ever busy.
 	Follower Follower
+	// Held may be nil, in which case only leased sessions are merged back into
+	// the list. It is the harness's own account of what it still holds.
+	Held     Held
 	Auth     *devicetoken.Authenticator
 	Pairing  *pairing.Service
 	Audit    *audit.Logger

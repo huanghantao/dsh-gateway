@@ -34,6 +34,12 @@ type stubHarness struct {
 	released []string
 	closed   []string
 	cancels  int
+	// resumes records every attach the child was asked for, so a test can prove
+	// the host answered from a handle it already had instead of asking again.
+	resumes []string
+	// releaseErr, when set, makes ReleaseSession fail the way DSH's adapter does:
+	// it cannot detach a session, so the handle stays where it is.
+	releaseErr error
 }
 
 func newStubHarness() *stubHarness {
@@ -73,6 +79,7 @@ func (s *stubHarness) NewSession(_ context.Context, workspace string) (harness.S
 func (s *stubHarness) ResumeSession(_ context.Context, sessionID, workspace string) (harness.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.resumes = append(s.resumes, sessionID)
 	sess := harness.Session{Info: harness.SessionInfo{ID: sessionID, Workspace: workspace}}
 	s.sessions[sessionID] = sess
 	return sess, nil
@@ -82,7 +89,7 @@ func (s *stubHarness) ReleaseSession(_ context.Context, sessionID string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.released = append(s.released, sessionID)
-	return nil
+	return s.releaseErr
 }
 
 func (s *stubHarness) CloseSession(_ context.Context, sessionID string) error {

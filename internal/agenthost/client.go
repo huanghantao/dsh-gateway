@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -85,6 +86,20 @@ type Client struct {
 	// rejoins work it did not start in this process.
 	awaiting map[string]chan hostwire.TurnResult
 
+	// held is every session the host is still holding a handle for, keyed by id.
+	//
+	// DSH's own session listing cannot report these: it skips every session that
+	// is live in the process answering it, and that process is the host's child.
+	// The handle outlives the lease that attached it — a release is bookkeeping,
+	// because detaching is not something DSH offers — so without this set a
+	// session would drop out of the phone's list the moment its lease expired
+	// and stay out until the child restarted, even while its agent was working.
+	//
+	// Replaced wholesale from the host's snapshot on every (re)connect, which is
+	// what keeps it true across a gateway restart, and maintained by the calls
+	// that attach or drop a handle.
+	held map[string]harness.SessionInfo
+
 	stop     chan struct{}
 	stopOnce sync.Once
 	started  bool
@@ -119,6 +134,7 @@ func NewClient(opts ClientOptions) *Client {
 		state:    harness.StateStarting,
 		epoch:    epochFromClock(opts.Now),
 		awaiting: map[string]chan hostwire.TurnResult{},
+		held:     map[string]harness.SessionInfo{},
 		stop:     make(chan struct{}),
 	}
 }
@@ -138,6 +154,13 @@ func (c *Client) Start(ctx context.Context) error {
 	c.mu.Lock()
 	c.started = true
 	c.mu.Unlock()
+	// The first connection knows nothing, and that is the awkward case rather
+	// than the empty one: the host is the process a redeploy does not replace, so
+	// it may already be holding sessions and running turns this one never saw.
+	// Rejoining here rather than only on a reconnect is what lets a gateway that
+	// has just started list — and follow — the work that outlived the gateway
+	// before it.
+	c.rejoin(conn) //nolint:contextcheck // rejoin bounds its own snapshot call in the client's lifetime, not the caller's request
 	// The supervisor outlives every request — it is what keeps the connection up
 	// for as long as this client lives — so it is rooted in the client's own
 	// lifetime rather than in the context that happened to start it.
@@ -355,6 +378,11 @@ func (c *Client) rejoin(conn *hostwire.Conn) {
 	}
 	c.setState(harness.State(snap.State.State), snap.State.Detail)
 
+	// What the host holds is its own answer to give, and it is the authority:
+	// a reconnect may follow a gateway restart (the child kept its sessions) or
+	// a host restart (it kept none, and DSH's listing can show them again).
+	c.replaceHeld(snap.Sessions)
+
 	for _, held := range snap.Sessions {
 		if held.Turn == nil {
 			continue
@@ -420,6 +448,51 @@ func (c *Client) State() harness.State {
 	return c.state
 }
 
+// HeldSessions reports the sessions the host is still holding a handle for.
+//
+// This is the set the harness's own listing cannot show — it skips every session
+// live in the process answering it — so the API merges it back into the list it
+// serves. Order is by id so two calls that hold the same sessions produce the
+// same slice.
+func (c *Client) HeldSessions() []harness.SessionInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]harness.SessionInfo, 0, len(c.held))
+	for _, info := range c.held {
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// rememberHeld records a session the host has just attached.
+func (c *Client) rememberHeld(info harness.SessionInfo) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.held == nil {
+		c.held = map[string]harness.SessionInfo{}
+	}
+	c.held[info.ID] = info
+}
+
+// forgetHeld drops a session the host no longer holds.
+func (c *Client) forgetHeld(sessionID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.held, sessionID)
+}
+
+// replaceHeld installs the host's own account of what it holds.
+func (c *Client) replaceHeld(held []hostwire.SessionHeld) {
+	next := make(map[string]harness.SessionInfo, len(held))
+	for _, s := range held {
+		next[s.Info.ID] = fromWireSessionInfo(s.Info)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.held = next
+}
+
 // ListSessions asks the host for a page of the sessions it can see.
 func (c *Client) ListSessions(ctx context.Context, workspace, cursor string) (harness.SessionPage, error) {
 	var out hostwire.SessionPage
@@ -442,7 +515,9 @@ func (c *Client) NewSession(ctx context.Context, workspace string) (harness.Sess
 		hostwire.NewSessionParams{Workspace: workspace}, &out); err != nil {
 		return harness.Session{}, err
 	}
-	return fromWireSession(out), nil
+	sess := fromWireSession(out)
+	c.rememberHeld(sess.Info)
+	return sess, nil
 }
 
 // ResumeSession attaches an existing session, taking DSH's single-writer lock
@@ -454,7 +529,9 @@ func (c *Client) ResumeSession(ctx context.Context, sessionID, workspace string)
 		hostwire.ResumeSessionParams{SessionID: sessionID, Workspace: workspace}, &out); err != nil {
 		return harness.Session{}, err
 	}
-	return fromWireSession(out), nil
+	sess := fromWireSession(out)
+	c.rememberHeld(sess.Info)
+	return sess, nil
 }
 
 // ReleaseSession detaches a session, leaving it resumable.
@@ -463,13 +540,24 @@ func (c *Client) ResumeSession(ctx context.Context, sessionID, workspace string)
 // nothing durable: the host keeps its handle — and therefore DSH's writer lock —
 // so a release is bookkeeping rather than the synthetic end-of-session that
 // closing writes into the log.
+//
+// A release that fails leaves the handle — and therefore the session — held, so
+// the set of held sessions only shrinks when the host says it did.
 func (c *Client) ReleaseSession(ctx context.Context, sessionID string) error {
-	return c.call(ctx, hostwire.MethodSessionRelease, hostwire.SessionRef{SessionID: sessionID}, nil)
+	if err := c.call(ctx, hostwire.MethodSessionRelease, hostwire.SessionRef{SessionID: sessionID}, nil); err != nil {
+		return err
+	}
+	c.forgetHeld(sessionID)
+	return nil
 }
 
 // CloseSession ends a session for real. It is for deletion, not for detaching.
 func (c *Client) CloseSession(ctx context.Context, sessionID string) error {
-	return c.call(ctx, hostwire.MethodSessionClose, hostwire.SessionRef{SessionID: sessionID}, nil)
+	if err := c.call(ctx, hostwire.MethodSessionClose, hostwire.SessionRef{SessionID: sessionID}, nil); err != nil {
+		return err
+	}
+	c.forgetHeld(sessionID)
+	return nil
 }
 
 // SetConfigOption changes model or reasoning effort for later turns.

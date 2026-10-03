@@ -143,20 +143,34 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	// missing from the list they are looking at, which reads as "it vanished".
 	// Merged back in at the front, because a session you are in the middle of is
 	// the one you are looking for.
-	if s.deps.Leases != nil {
-		seen := make(map[string]bool, len(out.Sessions))
+	//
+	// Two sources answer for those sessions, and both are needed: the leases
+	// this gateway holds cover a session while a phone is attached to it, and
+	// the handles the harness holds cover the leases that went away without the
+	// attachment going away — an expired lease, or a redeploy, which leave DSH's
+	// attachment in place on purpose (a release is bookkeeping; see the agent
+	// host's handleRelease).
+	if candidates := s.mergeBackCandidates(); len(candidates) > 0 {
+		seen := make(map[string]bool, len(out.Sessions)+len(candidates))
 		for _, view := range out.Sessions {
 			seen[view.ID] = true
 		}
-		owned := make([]sessionView, 0, 4)
-		for _, snapshot := range s.deps.Leases.List() {
-			if seen[snapshot.SessionID] {
+		owned := make([]sessionView, 0, len(candidates))
+		for _, candidate := range candidates {
+			if seen[candidate.id] {
 				continue
 			}
-			view := s.viewSession(r.Context(), harness.SessionInfo{
-				ID:        snapshot.SessionID,
-				Workspace: s.workspaceForSession(r.Context(), snapshot.SessionID),
-			})
+			seen[candidate.id] = true
+			// Resolved here rather than while the candidate list was built: it
+			// costs a log read and, for a session created moments ago, a harness
+			// round trip, so only the rows that survive the merge pay for it.
+			// Named apart from the page's own `workspace`, which is the filter
+			// below rather than this row's answer.
+			rowWorkspace := candidate.workspace
+			if rowWorkspace == "" {
+				rowWorkspace = s.workspaceForSession(r.Context(), candidate.id)
+			}
+			view := s.viewSession(r.Context(), harness.SessionInfo{ID: candidate.id, Workspace: rowWorkspace})
 			if hideArchived && view.Archived {
 				continue
 			}
@@ -166,10 +180,17 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			if query != "" && !view.matches(query) {
 				continue
 			}
+			// A page that asked for one workspace must not collect rows from
+			// another — the same filter the harness page above was served
+			// under. A row whose workspace could not be read is kept: unknown
+			// is not the same as elsewhere.
+			if workspace != "" && view.Workspace != "" && view.Workspace != workspace {
+				continue
+			}
 			owned = append(owned, view)
 		}
-		// Newest first among the owned ones: a list of everything this gateway is
-		// running, most recent on top.
+		// Newest first among the merged ones: a list of everything this gateway
+		// is running, most recent on top.
 		// UpdatedAt is optional on the wire — a session with no readable log yet
 		// has none — so the comparison has to tolerate a nil on either side.
 		sort.SliceStable(owned, func(i, j int) bool {
@@ -191,6 +212,37 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		out.Sessions = out.Sessions[:limit]
 	}
 	_ = httpcore.RespondJSON(w, http.StatusOK, out)
+}
+
+// mergeCandidate is a session the harness's own listing cannot report, with the
+// workspace when the source that named it already knows one.
+type mergeCandidate struct {
+	id        string
+	workspace string
+}
+
+// mergeBackCandidates lists the sessions the harness's own listing cannot report.
+//
+// A lease says this gateway is driving the session; a held handle says the
+// harness still owns it. Both are candidates for the merge, and a leased session
+// is normally held as well, so the caller de-duplicates by id.
+//
+// A lease carries no workspace — the log or the harness listing is asked for it
+// later, and only for rows that survive — while a held session was handed over
+// with the cwd DSH bound it to.
+func (s *Server) mergeBackCandidates() []mergeCandidate {
+	var out []mergeCandidate
+	if s.deps.Leases != nil {
+		for _, snapshot := range s.deps.Leases.List() {
+			out = append(out, mergeCandidate{id: snapshot.SessionID})
+		}
+	}
+	if s.deps.Held != nil {
+		for _, info := range s.deps.Held.HeldSessions() {
+			out = append(out, mergeCandidate{id: info.ID, workspace: info.Workspace})
+		}
+	}
+	return out
 }
 
 // listLimit reads the page size, defaulting to the configured transcript page.
