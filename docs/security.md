@@ -589,10 +589,12 @@ cannot attach to a session the desktop already has open, and vice versa.
 That is why session **leases** exist rather than hidden retries: attaching is
 explicit (`POST /sessions/{id}/lease`), `GET /sessions/{id}` reports `leased` so
 the client can explain why the desktop refuses to open a session, and the lease
-is released when the last event subscriber disconnects or after
-`session.idleTimeout` (5 minutes) with nothing watching. Because the lock is a
-kernel lock held by the child process, a crashed or stopped gateway releases it
-automatically — you cannot brick a session by killing the gateway.
+is released by an explicit `DELETE` or after `session.idleTimeout` (5 minutes)
+with nothing watching and no prompt in flight — not by a client disconnecting,
+and never for a lease that was pinned. Because the lock is a kernel lock held by
+the `dsh` child, it dies with that child, so killing the agent host cannot brick
+a session; killing the gateway on its own does not release it, because the child
+belongs to the host.
 
 ### 9.5 Mobile history depends on DSH's versioned on-disk log format
 
@@ -735,11 +737,12 @@ Do these in order; each is independent, so partial completion still helps.
 
 1. **Cut the ingress.** `sudo systemctl stop caddy` on the VPS (or
    `launchctl bootout gui/$(id -u)/dev.dsh-gateway.frpc` on the Mac). A stopped
-   gateway is not reachable, and the session lease is released when the process
-   dies.
-2. **Stop the agent.** `launchctl bootout gui/$(id -u)/dev.dsh-gateway.gateway`
-   on the Mac — this kills the gateway and its `dsh` child, so nothing is still
-   running tools.
+   gateway is not reachable, and the DSH session lock is a kernel lock, so it dies
+   with the child that holds it.
+2. **Stop the agent.** `launchctl bootout gui/$(id -u)/dev.dsh-gateway.agent-host`
+   **and** `launchctl bootout gui/$(id -u)/dev.dsh-gateway.gateway` on the Mac.
+   The agent host is the job that holds the `dsh` child, so booting out the
+   gateway alone leaves the agent — and whatever tools it is running — alive.
 3. **Revoke every device.** Delete `~/.dsh-gateway/devices.json` (all devices) or
    mark entries `"revoked": true` (deployment.md §7.6). Then rebuild your
    confidence in the phones before re-pairing.

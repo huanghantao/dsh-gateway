@@ -45,8 +45,12 @@ both. Neither reveals anything — `/readyz` distinguishes "the harness is up" f
 "the gateway is up", which an unauthenticated caller can already infer from
 whether a pairing attempt is answered.
 
-**Mutating requests** must additionally present an `Origin` header equal to the
-request `Host`, or be rejected `403`. This is the CSRF control.
+**Mutating requests** that carry an `Origin` header must present one equal to the
+request `Host`, or be rejected `403`. A request with no `Origin` is accepted:
+the device credential is already required and the session cookie is
+`SameSite=Strict`, so this header is a second lock on a door that is already
+shut rather than the lock itself, and native clients and same-origin navigations
+may omit it.
 
 **Timestamps** are RFC 3339, always UTC, with fractional seconds omitted when
 they are zero — do not parse a fixed number of digits. `GET /trash` reports
@@ -879,9 +883,11 @@ The gateway makes this explicit rather than hiding it:
 
 - Attaching happens on `POST /sessions/{id}/lease`, and implicitly when creating a
   session or sending a prompt.
-- The lease is released by `DELETE /sessions/{id}/lease`, when the last event
-  subscriber disconnects, or after `session.idleTimeout` with no subscriber and no
-  prompt in flight.
+- The lease is released by `DELETE /sessions/{id}/lease`, by the idle timer
+  (`session.idleTimeout` with nothing watching and no prompt in flight), and on
+  shutdown. Disconnecting does not release it: the timer is the only thing that
+  reclaims an idle lease, and a lease attached with `pinned: true` is never
+  reclaimed at all — only an explicit release ends it.
 - `GET /sessions/{id}` reports `leased`, so a client can explain *why* the desktop
   may refuse to open the session.
 

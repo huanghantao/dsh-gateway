@@ -208,8 +208,10 @@ makes it a first-class concept:
 
 - Attaching happens when you open a conversation, send a prompt, or explicitly
   request a lease.
-- The lease is released when the last client goes away, after
-  `session.idleTimeout` (default 5 minutes) with nothing happening.
+- The lease is released by an explicit release, or after `session.idleTimeout`
+  (default 5 minutes) with no client activity: a connected client keeps it warm,
+  and one that has gone away cannot. A lease attached with `pinned: true` is never
+  reclaimed by that timer.
 - A turn in flight pins the lease; nothing releases a session mid-turn. The
   scheduler answers that question, so "mid-turn" has exactly one definition.
 - Releasing a session drops any standing approval grants made in it: an
