@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -600,5 +601,59 @@ func TestPreviewIgnoresInjectionsAndTruncates(t *testing.T) {
 	// It keeps the *first* prompt, not the latest.
 	if meta.Preview == "a second question" {
 		t.Error("Preview took the newest prompt; a preview is what the session opened with")
+	}
+}
+
+// TestThePathMemoDoesNotOutliveItsSessions bounds the third cache.
+//
+// The projection cache and the metadata table both evict; the path memo did not,
+// so every session the watcher's one-second scan ever saw left an entry behind —
+// including sessions deleted from the desktop, which nothing here ever hears
+// about. Dropping one costs a glob, which is why the cap can be this cheap.
+func TestThePathMemoDoesNotOutliveItsSessions(t *testing.T) {
+	root := t.TempDir()
+	const workspace = "--Users-me-code-api--"
+	const sessions = 12
+
+	for i := 0; i < sessions; i++ {
+		dir := filepath.Join(root, workspace, fmt.Sprintf("session-%08d-2222-4333-8444-555555555555", i))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, logFileName), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write log: %v", err)
+		}
+	}
+
+	s := newTestStore(t, root)
+	s.maxPaths = 4
+
+	if logs := s.Logs(); len(logs) != sessions {
+		t.Fatalf("Logs returned %d sessions, want %d", len(logs), sessions)
+	}
+
+	s.mu.Lock()
+	held, ordered := len(s.paths), len(s.pathOrder)
+	s.mu.Unlock()
+	if held > 4 {
+		t.Errorf("path memos held = %d, want at most 4: the table grows with every session ever seen", held)
+	}
+	if ordered != held {
+		t.Errorf("order = %d and memos = %d, want them equal: the cap must track the entries it can drop", ordered, held)
+	}
+
+	// Forgetting a session drops its memo and its place in the order, so the cap
+	// is not consumed by sessions that are gone.
+	s.mu.Lock()
+	s.rememberPathLocked("session-keepme", "/tmp/keepme")
+	before := len(s.paths)
+	s.forgetPathLocked("session-keepme")
+	after, orderedAfter := len(s.paths), len(s.pathOrder)
+	s.mu.Unlock()
+	if after != before-1 {
+		t.Errorf("memos = %d after forgetting one, want %d", after, before-1)
+	}
+	if orderedAfter != after {
+		t.Errorf("order = %d after forgetting one and memos = %d, want them equal", orderedAfter, after)
 	}
 }

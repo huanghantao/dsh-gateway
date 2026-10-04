@@ -252,7 +252,14 @@ type Store struct {
 	// costs a glob of the whole tree — once per session, on every list request —
 	// which is the difference between a list that costs one directory scan and
 	// one that costs thousands of stats.
-	paths map[string]string
+	//
+	// It is a memo, so forgetting an entry costs one glob rather than
+	// correctness — which is why it is capped like the other two tables instead
+	// of being kept for every session the store has ever seen. pathOrder is the
+	// ids in the order they were first resolved; see rememberPathLocked.
+	paths     map[string]string
+	pathOrder []string
+	maxPaths  int
 
 	// metas holds metadata only, which is what the session list needs for every
 	// session the operator owns. Projections are far too large to keep for all of
@@ -381,6 +388,7 @@ func New(root string, logger *logx.Logger) (*Store, error) {
 		cache:    map[string]*cached{},
 		paths:    map[string]string{},
 		maxCache: 16,
+		maxPaths: 4096,
 		metas:    map[string]*cachedMeta{},
 		maxMetas: 4096,
 	}, nil
@@ -728,11 +736,43 @@ func (s *Store) Logs() []Log {
 	// One scan answers every later lookup.
 	s.mu.Lock()
 	for id, path := range found {
-		s.paths[id] = path
+		s.rememberPathLocked(id, path)
 	}
 	s.mu.Unlock()
 
 	return logs
+}
+
+// rememberPathLocked records where a session's log lives, dropping the oldest
+// memo once the table is at its cap. The caller holds s.mu.
+//
+// The path is found by globbing the sessions root, and the watcher runs that
+// scan every second — so without a cap, one entry per session that has ever
+// existed stays here for the life of the process, whether or not the session
+// still does.
+func (s *Store) rememberPathLocked(sessionID, path string) {
+	if _, exists := s.paths[sessionID]; !exists {
+		s.pathOrder = append(s.pathOrder, sessionID)
+	}
+	s.paths[sessionID] = path
+
+	for len(s.pathOrder) > s.maxPaths {
+		oldest := s.pathOrder[0]
+		s.pathOrder = s.pathOrder[1:]
+		delete(s.paths, oldest)
+	}
+}
+
+// forgetPathLocked drops a session's memo and its place in the order. The caller
+// holds s.mu.
+func (s *Store) forgetPathLocked(sessionID string) {
+	delete(s.paths, sessionID)
+	for index, id := range s.pathOrder {
+		if id == sessionID {
+			s.pathOrder = append(s.pathOrder[:index], s.pathOrder[index+1:]...)
+			return
+		}
+	}
 }
 
 // stat resolves a session id to its log file and current size and mtime.
@@ -831,7 +871,7 @@ func (s *Store) logPath(sessionID string) (string, error) {
 		path := filepath.Join(dir, logFileName)
 		if _, err := os.Stat(path); err == nil {
 			s.mu.Lock()
-			s.paths[sessionID] = path
+			s.rememberPathLocked(sessionID, path)
 			s.mu.Unlock()
 			return path, nil
 		}
