@@ -32,14 +32,27 @@ type Bridge struct {
 	// event would reach the phone with an empty tool name *and* no arguments —
 	// a card with no way to say what finished, or what it had been doing.
 	//
-	// Entries live only as long as the call does: a completion removes its own,
-	// so the map is bounded by how many calls are in flight at once.
+	// A completion removes its own entry, but a completion is not guaranteed: a
+	// turn cancelled mid-call, or a child killed, leaves the opening frame with
+	// nothing to close it. So the table is also capped, oldest first — see
+	// maxOpenCalls — rather than trusting every call to end.
 	open map[string]opened
+	// order is the call ids in the order they were first seen, so the cap has an
+	// oldest to drop without scanning the map.
+	order []string
 
 	// limits is the deployment's byte budget for a tool's arguments and result.
 	// It is held here so that one payload shape is bounded in one place.
 	limits config.Limits
 }
+
+// maxOpenCalls bounds the in-flight call table.
+//
+// It has to exist because the map holds raw tool arguments, and an edit's
+// argument is a whole file: one leaked entry the size of the file it wrote is
+// worse than the few hundred bytes a name and a command cost. The number is the
+// notifier's, for the same correlation and the same reason.
+const maxOpenCalls = 256
 
 // opened is what a call was announced with.
 type opened struct {
@@ -113,17 +126,16 @@ func (b *Bridge) publishTool(u harness.Update) {
 		if input == "" {
 			input = known.input
 		}
-		b.open[tool.ID] = opened{name: name, input: input}
+		b.trackOpenLocked(tool.ID, opened{name: name, input: input})
 	case tracked:
-		// A completion: fill in whatever it left out, then stop tracking. Leaving
-		// entries behind would grow without bound over a long-lived gateway.
+		// A completion: fill in whatever it left out, then stop tracking.
 		if name == "" {
 			name = known.name
 		}
 		if input == "" {
 			input = known.input
 		}
-		delete(b.open, tool.ID)
+		b.forgetOpenLocked(tool.ID)
 	}
 	b.mu.Unlock()
 
@@ -188,4 +200,34 @@ func configView(options []harness.ConfigOption) []map[string]any {
 		})
 	}
 	return out
+}
+
+// trackOpenLocked records what a call was announced with, dropping the oldest
+// entries once the table is at its cap. The caller holds b.mu.
+func (b *Bridge) trackOpenLocked(callID string, o opened) {
+	if _, exists := b.open[callID]; !exists {
+		b.order = append(b.order, callID)
+	}
+	b.open[callID] = o
+
+	for len(b.order) > maxOpenCalls {
+		oldest := b.order[0]
+		b.order = b.order[1:]
+		delete(b.open, oldest)
+	}
+}
+
+// forgetOpenLocked stops tracking a call that has ended. The caller holds b.mu.
+//
+// The id is dropped from the order as well as from the map, so the cap counts
+// calls that are actually still open rather than every call the bridge has ever
+// seen.
+func (b *Bridge) forgetOpenLocked(callID string) {
+	delete(b.open, callID)
+	for index, id := range b.order {
+		if id == callID {
+			b.order = append(b.order[:index], b.order[index+1:]...)
+			return
+		}
+	}
 }

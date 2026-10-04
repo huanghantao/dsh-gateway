@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -96,5 +97,73 @@ func TestClosingFrameKeepsTheNameAndCarriesTheFacts(t *testing.T) {
 	}
 	if end.IsError {
 		t.Error("IsError = true, want false: a non-zero exit is reported, not errored")
+	}
+}
+
+// TestAnUnclosedToolCallCannotGrowTheTableForever bounds the call table.
+//
+// A completion removes its own entry, but a completion is not guaranteed: a turn
+// cancelled mid-call, or a child killed, leaves an opening frame with nothing to
+// close it. The entry holds the call's raw arguments — a whole file, for an edit
+// — so an unbounded table is not a few bytes per leak.
+func TestAnUnclosedToolCallCannotGrowTheTableForever(t *testing.T) {
+	bus := events.New(events.Config{Replay: 8, Queue: 8})
+	b := New(bus, config.Default().Limits)
+
+	open := func(id string) {
+		b.Publish(harness.Update{SessionID: "s1", Kind: harness.UpdateTool, Tool: &harness.ToolCall{
+			ID:     id,
+			Title:  "edit",
+			Status: harness.ToolInProgress,
+			Input:  `{"path":"/tmp/notes","content":"a whole file's worth of arguments"}`,
+		}})
+	}
+
+	total := maxOpenCalls * 3
+	for i := 0; i < total; i++ {
+		open(fmt.Sprintf("c%d", i))
+	}
+
+	count := func() (int, int) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return len(b.open), len(b.order)
+	}
+	held, ordered := count()
+	if held > maxOpenCalls {
+		t.Errorf("open calls = %d, want at most %d: nothing closes a call whose end never arrives", held, maxOpenCalls)
+	}
+	if ordered != held {
+		t.Errorf("order = %d and open = %d, want them equal: the cap must count calls that are still open", ordered, held)
+	}
+
+	// The oldest go first: their completion, if it ever came, came long ago.
+	b.mu.Lock()
+	_, oldestHeld := b.open["c0"]
+	_, newestHeld := b.open[fmt.Sprintf("c%d", total-1)]
+	b.mu.Unlock()
+	if oldestHeld {
+		t.Error("the oldest call survived the cap, so the newest are what gets dropped")
+	}
+	if !newestHeld {
+		t.Error("the call that was opened last is not tracked, so its closing frame will arrive with no name")
+	}
+
+	// And the cap does not break the correlation it exists for: a completion
+	// still finds its entry, and leaves the order the size it found it.
+	open("c_final")
+	before, _ := count()
+	b.Publish(harness.Update{SessionID: "s1", Kind: harness.UpdateTool, Tool: &harness.ToolCall{
+		ID:     "c_final",
+		Status: harness.ToolCompleted,
+		Output: "ok",
+	}})
+	after, orderedAfter := count()
+	if after != before-1 {
+		t.Errorf("open calls = %d after a completion, want %d", after, before-1)
+	}
+	if orderedAfter != after {
+		t.Errorf("order = %d after a completion and open = %d: a finished call still counts against the cap",
+			orderedAfter, after)
 	}
 }
