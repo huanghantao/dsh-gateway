@@ -55,6 +55,12 @@ FRP_TOKEN="${FRP_TOKEN:-}"
 WORKSPACES="${WORKSPACES:-}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
+# 1 leaves the agent host — and whatever turn it is running — alone. The deploy
+# that needs this is the one an agent is running: the turn doing the deploying is
+# a turn the host is running, so restarting it ends the conversation that asked
+# for the deploy. See --skip-host-restart.
+SKIP_HOST_RESTART="${SKIP_HOST_RESTART:-0}"
+
 GATEWAY_LABEL="dev.dsh-gateway.gateway"
 # The agent host is a *peer* job, not a child of the gateway's, and that is
 # load-bearing rather than tidiness: launchd kills every process in a job's
@@ -120,17 +126,25 @@ Required:
 Options:
   --token TOKEN        Tunnel token from the VPS installer. Same as FRP_TOKEN.
   --install-dir DIR    Where to install the binaries. Default: ~/.local/bin.
+  --skip-host-restart  Install everything and restart the gateway and the
+                       tunnel, but leave the agent host running what it is
+                       running. Use it when a turn is in flight that must not be
+                       ended — including the turn running this installer, which
+                       is itself a turn the host is running. The new host binary
+                       and plist take effect at its next restart; the command to
+                       do that is printed when the install finishes.
   -h, --help           Show this help.
 
 What it touches:
   <repo>/web/dist                       compiled from web/src with `npm run build`
   <repo>/cmd/dsh-gateway                built with `go build`
-  INSTALL_DIR/dsh-gateway               the gateway binary
+  INSTALL_DIR/{dsh-gateway,dsh-agent-host}
+                                        the two binaries
   INSTALL_DIR/frpc                      frp client, pinned and checksum-verified
   ~/.dsh-gateway/config.yaml            written ONLY if missing
   ~/.dsh-gateway/frpc.toml              rewritten from the template (0600)
-  ~/Library/LaunchAgents/dev.dsh-gateway.{gateway,frpc}.plist
-  ~/Library/Logs/dsh-gateway/{gateway,frpc}.log
+  ~/Library/LaunchAgents/dev.dsh-gateway.{gateway,agent-host,frpc}.plist
+  ~/Library/Logs/dsh-gateway/{gateway,agent-host,frpc}.log
 
 Pairing: after this finishes, run `dsh-gateway pair` and enter the code it
 prints on the phone.
@@ -167,6 +181,10 @@ parse_args() {
 			[[ $# -ge 2 ]] || die "--install-dir needs a value"
 			INSTALL_DIR="$2"
 			shift 2
+			;;
+		--skip-host-restart)
+			SKIP_HOST_RESTART=1
+			shift
 			;;
 		-h | --help)
 			usage
@@ -1286,8 +1304,23 @@ main() {
 	# start-up, and starting it first would make every deploy begin with a
 	# reconnect loop. The host is a peer job, so it survives the gateway being
 	# replaced a moment later.
-	bootstrap_agent "$AGENT_HOST_LABEL" "$AGENT_DIR/$AGENT_HOST_LABEL.plist"
-	verify_host_up
+	if [[ $SKIP_HOST_RESTART == "1" ]]; then
+		# The plist and the binary on disk are the new ones; the process keeps
+		# the ones it started with, and the turn it is running with them. This is
+		# the only reason to leave a job behind, and the instruction to finish the
+		# job is printed rather than implied — an operator who forgets it is
+		# running two versions of the host and does not know it.
+		warn "--skip-host-restart: $AGENT_HOST_LABEL keeps the binary and plist it started with"
+		warn "  finish the deploy when no turn is running:"
+		warn "    launchctl bootout gui/$(id -u)/$AGENT_HOST_LABEL"
+		warn "    launchctl bootstrap gui/$(id -u) $AGENT_DIR/$AGENT_HOST_LABEL.plist"
+		# Still checked: a host that is not answering is worth knowing about even
+		# though this run did not restart it.
+		verify_host_up
+	else
+		bootstrap_agent "$AGENT_HOST_LABEL" "$AGENT_DIR/$AGENT_HOST_LABEL.plist"
+		verify_host_up
+	fi
 	bootstrap_agent "$GATEWAY_LABEL" "$AGENT_DIR/$GATEWAY_LABEL.plist"
 	bootstrap_agent "$FRPC_LABEL" "$AGENT_DIR/$FRPC_LABEL.plist"
 

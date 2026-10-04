@@ -532,10 +532,26 @@ dsh-gateway version
 | What | Where |
 |---|---|
 | frps, Caddy, the VPS systemd units | `journalctl -u frps -u caddy -f` (add `-n 100 --no-pager` to read rather than follow) |
-| gateway process | `~/Library/Logs/dsh-gateway/gateway.log` (everything the gateway says; it logs to stderr, so `gateway.stdout.log` is normally empty) |
+| gateway process | `~/Library/Logs/dsh-gateway/gateway.log` (everything the gateway says; rotated at 16 MiB with one `.1` generation) |
+| agent host | `~/Library/Logs/dsh-gateway/agent-host.log` (sessions attached, turns settled, child restarts; same rotation) |
 | frpc | `~/Library/Logs/dsh-gateway/frpc.log` (`frpc.err.log`) |
+| launchd's own capture | `gateway.stderr.log`, `agent-host.stderr.log` — what a process said before its own log was open (an unparseable config, a panic before the first line), plus the pairing QR the gateway draws at startup, which is deliberately not written to the log file because it carries a live code |
 | launchd state | `launchctl print gui/$(id -u)/dev.dsh-gateway.gateway` — includes the last exit status |
 | security events | `~/.dsh-gateway/audit.jsonl` (see below) |
+
+**The two process logs rotate; nothing else here does.** launchd appends to
+`StandardErrorPath` for as long as the job exists and never rotates it, and macOS
+has no user-level rotator to hand it to — `newsyslog` needs root, which this
+install deliberately never asks for. So the gateway and the agent host write
+their own file instead and rotate it themselves: at 16 MiB the current log is
+renamed to `.1`, overwriting the previous generation, so the peak on disk is two
+files. The plist sets `DSH_GATEWAY_LOG_FILE` for each job; to change the bound,
+edit `DSH_GATEWAY_LOG_MAX_MB` there (or set `log.maxSizeMB` in `config.yaml`,
+which the environment overrides). `log.file` empty means stderr, which is what
+running the binary by hand gets you.
+
+What launchd captures now is only the output that predates the logger — it is
+small by construction, and it is the one file here that could still grow.
 
 The audit log is one JSON object per line, rotated at 8 MiB with a single `.1`
 generation:
@@ -577,6 +593,30 @@ The installer rebuilds, reinstalls, and reloads both launchd jobs (bootout +
 bootstrap), so the new binary takes effect. `dsh-gateway version` prints the git
 description the build was made from (falling back to `dev` when the checkout has
 no tags), which is what you want in a bug report.
+
+**A gateway restart does not interrupt a turn; an agent-host restart does.** That
+is the point of the two-tier split — a new gateway reconnects to the host and
+rejoins the turn it finds running (`rejoined a turn that was already running` in
+`gateway.log`) — but the host owns the child process the turn runs in, so
+restarting *it* ends whatever is in flight (after its drain window). When the
+deploy itself is being run by a turn — an agent asked to deploy the service it is
+running on — pass:
+
+```sh
+bash deploy/mac/install.sh … --skip-host-restart
+```
+
+Everything is installed and the gateway and tunnel are reloaded; the host keeps
+the binary and plist it started with, and the installer prints the two commands
+to finish the job at a quiet moment:
+
+```sh
+launchctl bootout    gui/$(id -u)/dev.dsh-gateway.agent-host
+launchctl bootstrap  gui/$(id -u) ~/Library/LaunchAgents/dev.dsh-gateway.agent-host.plist
+```
+
+Until that runs, `agenthost` changes (and the host's own log settings) are on
+disk but not in effect, and the phone is talking to the previous host build.
 
 ### 7.5 Update frp or Caddy
 
@@ -1264,3 +1304,5 @@ for why, and use the desktop locally for anything that needs account sign-in.
 | `transcript.follow` | `true` | stream what other DSH processes append to a session log, so a desktop session is live on the phone. Sessions this gateway drives are excluded rather than duplicated |
 | `transcript.followInterval` | `1s` | how often those logs are re-read; raise it on a slow machine, lower it for a snappier feed |
 | `desktopUI.enabled` | `false` | exposes DSH's own GUI at `/`; read the threat model first |
+| `log.file` | empty (stderr) | where the process log is written. The launchd jobs set `DSH_GATEWAY_LOG_FILE` to a file under `~/Library/Logs/dsh-gateway/` and the environment wins over this key, because the plist is what a redeploy rewrites; empty means stderr, which is right for running the binary by hand. See [§7.2](#72-logs) |
+| `log.maxSizeMB` | `16` | how large that file may get before it is rotated to one `.1` generation — so the peak on disk is twice this. The installer sets `DSH_GATEWAY_LOG_MAX_MB` alongside the path |
