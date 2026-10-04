@@ -7,6 +7,7 @@ package logx
 import (
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 )
 
@@ -33,9 +34,18 @@ type Config struct {
 	Format Format
 	// AddSource records the calling file and line.
 	AddSource bool
+	// File is where the log is written. Empty means stderr — what a daemon under
+	// launchd or systemd should do, and what New always does. A path is opened
+	// with rotation by Open, and is how a deployment whose supervisor does not
+	// rotate anything stops growing a log forever.
+	File string
+	// MaxBytes bounds the file before it is rotated to a single ".1" generation.
+	// Zero takes DefaultMaxBytes. It is ignored when File is empty.
+	MaxBytes int64
 }
 
-// New builds a logger writing to w.
+// New builds a logger writing to w. File and MaxBytes are ignored: a caller that
+// wants them wants Open.
 func New(w io.Writer, cfg Config) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: parseLevel(cfg.Level), AddSource: cfg.AddSource}
 
@@ -46,6 +56,24 @@ func New(w io.Writer, cfg Config) *slog.Logger {
 		h = slog.NewTextHandler(w, opts)
 	}
 	return slog.New(h)
+}
+
+// Open builds a logger that writes where cfg says, and returns the function that
+// closes whatever it opened.
+//
+// A log file that cannot be opened is not fatal, and deliberately so: refusing to
+// serve the operator's phone because a log could not be written would trade the
+// product for its diagnostics. The error is returned alongside a logger on
+// stderr, so the caller can say what happened and carry on.
+func Open(cfg Config) (*slog.Logger, func() error, error) {
+	if cfg.File == "" {
+		return New(os.Stderr, cfg), func() error { return nil }, nil
+	}
+	file, err := OpenRotatingFile(cfg.File, cfg.MaxBytes)
+	if err != nil {
+		return New(os.Stderr, cfg), func() error { return nil }, err
+	}
+	return New(file, cfg), file.Close, nil
 }
 
 func parseLevel(s string) slog.Level {

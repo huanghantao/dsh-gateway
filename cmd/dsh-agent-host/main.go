@@ -178,7 +178,17 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	logger := logx.New(os.Stderr, logx.Config{Level: cfg.Log.Level, Format: logx.Format(cfg.Log.Format)})
+	logger, closeLog, logErr := logx.Open(logx.Config{
+		Level:    cfg.Log.Level,
+		Format:   logx.Format(cfg.Log.Format),
+		File:     cfg.Log.File,
+		MaxBytes: int64(cfg.Log.MaxSizeMB) << 20,
+	})
+	defer func() { _ = closeLog() }()
+	if logErr != nil {
+		logger.Warn("could not open the log file; logging to stderr",
+			"file", cfg.Log.File, "error", logErr.Error())
+	}
 	logger.Debug("configuration loaded", "path", configPath)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

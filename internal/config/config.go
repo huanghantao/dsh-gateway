@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,18 @@ type Log struct {
 	Format string `yaml:"format"`
 	// AddSource records the calling file and line on every record.
 	AddSource bool `yaml:"addSource"`
+	// File is where the log is written. Empty means stderr, which is what a
+	// daemon should do when its supervisor collects output — and what launchd
+	// does *not* do anything useful with, since StandardErrorPath is a file
+	// nothing ever rotates on macOS without root.
+	//
+	// So the installer sets this to a file under ~/Library/Logs/dsh-gateway and
+	// the gateway rotates it itself, keeping one previous generation. See
+	// maxSizeMB, and docs/deployment.md §7.7.
+	File string `yaml:"file"`
+	// MaxSizeMB bounds the log before it is rotated to a single ".1" generation.
+	// The peak on disk is therefore twice this. Zero takes the default.
+	MaxSizeMB int `yaml:"maxSizeMB"`
 }
 
 // DSH describes the managed DeepSeek Harness child process.
@@ -619,6 +632,24 @@ func (c *Config) ApplyEnv(getenv func(string) string) error {
 	if v := getenv("DSH_GATEWAY_LOG_FORMAT"); v != "" {
 		c.Log.Format = v
 	}
+	// The two log-file keys come from the environment rather than the file on
+	// purpose: the launchd plist is the file the installer owns and rewrites on
+	// every deploy, while config.yaml is written once and then left alone. A
+	// deployment that already exists gets rotation from a redeploy this way,
+	// without the installer editing a file it promised never to touch.
+	if v := getenv("DSH_GATEWAY_LOG_FILE"); v != "" {
+		if c.Log.File != "" && c.Log.File != v {
+			c.noteOverride("log.file", c.Log.File, v)
+		}
+		c.Log.File = v
+	}
+	if v := getenv("DSH_GATEWAY_LOG_MAX_MB"); v != "" {
+		mb, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil || mb < 0 {
+			return fmt.Errorf("DSH_GATEWAY_LOG_MAX_MB: %q is not a size in megabytes", v)
+		}
+		c.Log.MaxSizeMB = mb
+	}
 	if v := getenv("DSH_GATEWAY_DSH_BINARY"); v != "" {
 		c.DSH.Binary = v
 	}
@@ -665,6 +696,12 @@ func (c *Config) Resolve() error {
 	}
 	if c.Transcript.SessionsDir != "" {
 		if c.Transcript.SessionsDir, err = Expand(c.Transcript.SessionsDir); err != nil {
+			return err
+		}
+	}
+	// Empty stays empty, which is what "log to stderr" is expressed as.
+	if c.Log.File != "" {
+		if c.Log.File, err = Expand(c.Log.File); err != nil {
 			return err
 		}
 	}
@@ -774,6 +811,9 @@ func (c Config) Validate() error {
 
 	if c.StateDir == "" {
 		fail("stateDir: must not be empty")
+	}
+	if c.Log.MaxSizeMB < 0 {
+		fail("log.maxSizeMB: must not be negative; 0 takes the built-in 16 MiB")
 	}
 	if c.DSH.Binary == "" {
 		fail("dsh.binary: must not be empty")

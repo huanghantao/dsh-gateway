@@ -784,6 +784,58 @@ func TestApplyEnvHonoursOnlyTheDocumentedVariables(t *testing.T) {
 	}
 }
 
+// TestTheLogFileComesFromTheEnvironment pins the override that lets an existing
+// install gain rotation without the installer editing a config file it promised
+// never to touch.
+func TestTheLogFileComesFromTheEnvironment(t *testing.T) {
+	cfg := config.Default()
+	if cfg.Log.File != "" {
+		t.Fatalf("log.file default = %q, want empty: a daemon logs to stderr unless told otherwise", cfg.Log.File)
+	}
+
+	err := cfg.ApplyEnv(env(map[string]string{
+		"DSH_GATEWAY_LOG_FILE":   "~/Library/Logs/dsh-gateway/gateway.log",
+		"DSH_GATEWAY_LOG_MAX_MB": "8",
+	}))
+	if err != nil {
+		t.Fatalf("ApplyEnv: %v", err)
+	}
+	if cfg.Log.MaxSizeMB != 8 {
+		t.Errorf("maxSizeMB = %d, want 8", cfg.Log.MaxSizeMB)
+	}
+
+	// The plist passes an absolute path, but a hand-written one may use ~, and a
+	// path that is never expanded is a file created in a directory named "~".
+	if err := cfg.Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory to expand against: %v", err)
+	}
+	want := filepath.Join(home, "Library", "Logs", "dsh-gateway", "gateway.log")
+	if cfg.Log.File != want {
+		t.Errorf("log.file = %q, want %q", cfg.Log.File, want)
+	}
+
+	// A size that is not a number is a configuration mistake, not something to
+	// guess at.
+	bad := config.Default()
+	if err := bad.ApplyEnv(env(map[string]string{"DSH_GATEWAY_LOG_MAX_MB": "lots"})); err == nil {
+		t.Error("a non-numeric DSH_GATEWAY_LOG_MAX_MB was accepted")
+	}
+
+	// Negative sizes are refused where every other invalid value is: at startup,
+	// with the key named.
+	negative := config.Default()
+	negative.StateDir = t.TempDir()
+	negative.Workspaces = []string{t.TempDir()}
+	negative.Log.MaxSizeMB = -1
+	if err := negative.Validate(); err == nil {
+		t.Error("a negative log.maxSizeMB was accepted")
+	}
+}
+
 // TestLoadOfAMissingFileKeepsTheDefaults covers the first-run path the installer
 // relies on: before any config file exists, Load must hand back the defaults
 // rather than an error. The defaults still have no workspace root, so validation
