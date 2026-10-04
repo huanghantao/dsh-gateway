@@ -13,6 +13,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // WriteFile durably replaces path with data.
@@ -59,6 +61,57 @@ func WriteFile(path string, data []byte, perm fs.FileMode) (err error) {
 // WriteFileSecret is WriteFile with 0600 permissions.
 func WriteFileSecret(path string, data []byte) error {
 	return WriteFile(path, data, 0o600)
+}
+
+// staleTempAge is how long a temporary file must have sat untouched before the
+// sweep will touch it.
+//
+// An hour is far longer than any write here takes — these are the gateway's own
+// small documents — and far shorter than forever. It exists because the sweep
+// must not be able to delete a temp file that a live writer is still filling:
+// `dsh-gateway pair` runs beside a running gateway and writes the same
+// directory, and racing it would be a worse bug than the litter.
+const staleTempAge = time.Hour
+
+// SweepTemp removes temporary files this package left behind in dir, and reports
+// how many went.
+//
+// WriteFile removes its own temporary on every failure it can observe, so what
+// is left is a write the process did not survive: a SIGKILL, a power cut, a
+// redeploy that ran out of patience. Each is silent, never read again, and as
+// large as the document that was being written — so somebody has to look.
+func SweepTemp(dir string, now time.Time) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, fmt.Errorf("atomicfile: read %s: %w", dir, err)
+	}
+
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !isTempName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			// It vanished between the read and the stat, which is the outcome
+			// this sweep wanted anyway.
+			continue
+		}
+		if now.Sub(info.ModTime()) < staleTempAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err == nil {
+			removed++
+		}
+	}
+	return removed, nil
+}
+
+// isTempName reports whether name is the shape CreateTemp produces here:
+// ".<document>.tmp-<random>". The leading dot keeps the litter out of listings,
+// and is also what makes it distinguishable from a file anyone meant to keep.
+func isTempName(name string) bool {
+	return strings.HasPrefix(name, ".") && strings.Contains(name, ".tmp-")
 }
 
 // syncDir fsyncs a directory so the rename itself is durable. Some filesystems
