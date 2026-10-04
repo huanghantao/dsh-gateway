@@ -118,16 +118,30 @@ your connection times are recorded on the VPS.
 
 | Where | What | Mode |
 |---|---|---|
-| `~/.dsh-gateway/devices.json` | Device names, SHA-256 token hashes, last-seen times | 0600 |
+| `~/.dsh-gateway/devices.json` | Device names, SHA-256 token hashes, last-seen times — a record is forgotten once its credential has been expired for 30 days | 0600 |
 | `~/.dsh-gateway/pairing.key` | The secret every pairing code is derived from | 0600 |
 | `~/.dsh-gateway/vapid.key` | The push signing key | 0600 |
 | `~/.dsh-gateway/push.json` | Browser push endpoints and their keys | 0600 |
 | `~/.dsh-gateway/audit.jsonl` | Security-relevant events, rotated at 8 MiB | 0600 |
-| `~/.dsh-gateway/curation.json` | Session ids you archived or pinned — no content | 0600 |
-| `~/Library/Logs/dsh-gateway/gateway.log` | Operational log | 0700 directory |
+| `~/.dsh-gateway/curation.json` | Session ids you archived or pinned — no content; an id goes when its session is deleted for good | 0600 |
+| `~/Library/Logs/dsh-gateway/gateway.log` | Operational log, rotated at 16 MiB with one previous generation | 0700 directory |
 
 The state directory itself is created 0700, and `dsh-gateway doctor` warns if it
 is not.
+
+Nothing here is a log of everything that has ever happened. Two things are worth
+knowing about how that is enforced, because neither is automatic:
+
+- **A device record outlives its credential by thirty days, and then goes.** The
+  row is what the devices screen draws — a revoked phone's row is the evidence
+  that the revocation happened — but re-pairing after the 30-day session TTL
+  enrols a *new* id, so without this the file would hold one dead entry per
+  re-pairing forever.
+- **The operational logs are rotated by the gateway itself**, because launchd
+  appends to them and never rotates them. The `gateway.stderr.log` files beside
+  them are launchd's own capture: what a process said before its log was open,
+  and the pairing QR drawn at startup — which is kept out of the log file on
+  purpose, because a QR carries a live code.
 
 ### The audit log
 

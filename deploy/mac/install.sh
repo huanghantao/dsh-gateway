@@ -760,15 +760,25 @@ $gw_args_xml	</array>
 		<string>$(xml_escape "$CONFIG_DIR")</string>
 		<key>DSH_GATEWAY_PUBLIC_URL</key>
 		<string>$(xml_escape "$PUBLIC_URL")</string>
+		<!-- The gateway writes this file itself and rotates it. launchd never
+		     rotates StandardErrorPath, and macOS has no user-level rotator to
+		     hand it to (newsyslog needs root, which this installer deliberately
+		     never asks for) — so without this the log grows for as long as the
+		     job runs and only a human with rm ever removes a byte. It names the
+		     file the plist used to capture, so `tail -f gateway.log` still
+		     reads the same file it always did. -->
+		<key>DSH_GATEWAY_LOG_FILE</key>
+		<string>$(xml_escape "$LOG_DIR/gateway.log")</string>
+		<key>DSH_GATEWAY_LOG_MAX_MB</key>
+		<string>16</string>
 	</dict>
-	<!-- The gateway logs to stderr, as a daemon should, and writes nothing to
-	     stdout. So gateway.log receives everything worth reading and
-	     gateway.stdout.log is normally empty. Naming them the other way round —
-	     which this file did until a real deployment showed an operator tailing a
-	     permanently empty file — puts the log people are told to read in the
-	     place nothing is written. -->
+	<!-- What launchd captures from here is only what the gateway said before its
+	     own log was open — a config file that would not parse, a panic before the
+	     first line — plus whatever the standard library writes to stderr on its
+	     own. Rare and small, which matters: this is the file nothing rotates.
+	     gateway.log holds everything worth reading. -->
 	<key>StandardErrorPath</key>
-	<string>$(xml_escape "$LOG_DIR/gateway.log")</string>
+	<string>$(xml_escape "$LOG_DIR/gateway.stderr.log")</string>
 	<key>StandardOutPath</key>
 	<string>$(xml_escape "$LOG_DIR/gateway.stdout.log")</string>
 	<!-- How long launchd waits between SIGTERM and SIGKILL. Its default is
@@ -825,14 +835,23 @@ $host_args_xml	</array>
 		<string>$(xml_escape "$HOME")</string>
 		<key>DSH_GATEWAY_STATE_DIR</key>
 		<string>$(xml_escape "$CONFIG_DIR")</string>
+		<!-- Same reason as the gateway's: the host logs its own file and rotates
+		     it. The host is the longer-lived of the two jobs, so a file nothing
+		     rotates matters more here, not less. -->
+		<key>DSH_GATEWAY_LOG_FILE</key>
+		<string>$(xml_escape "$LOG_DIR/agent-host.log")</string>
+		<key>DSH_GATEWAY_LOG_MAX_MB</key>
+		<string>16</string>
 	</dict>
 	<!-- A host restart is the one restart that can end a turn, so its shutdown
 	     drains first. This is the ceiling launchd allows that drain before it
 	     stops asking. -->
 	<key>ExitTimeOut</key>
 	<integer>${EXIT_TIMEOUT_SECONDS}</integer>
+	<!-- Only what the host said before its own log was open. See the gateway's
+	     plist for the reasoning. -->
 	<key>StandardErrorPath</key>
-	<string>$(xml_escape "$LOG_DIR/agent-host.log")</string>
+	<string>$(xml_escape "$LOG_DIR/agent-host.stderr.log")</string>
 	<key>StandardOutPath</key>
 	<string>$(xml_escape "$LOG_DIR/agent-host.stdout.log")</string>
 </dict>

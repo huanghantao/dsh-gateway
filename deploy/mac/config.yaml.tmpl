@@ -31,6 +31,19 @@ log:
   level: "info"
   format: "text"
   addSource: false
+  # Where the log is written, and how big it may get before it is rotated to a
+  # single ".1" generation — so the peak on disk is twice maxSizeMB.
+  #
+  # Left empty here because the launchd jobs set both from their own plists
+  # (DSH_GATEWAY_LOG_FILE / DSH_GATEWAY_LOG_MAX_MB), and the environment wins
+  # over this file: the plist is what a redeploy rewrites, while this file is
+  # written once and then left alone. An empty file means stderr — which is what
+  # running the binary by hand gets you, and is the right answer there.
+  #
+  # Set it to run the gateway outside launchd and still get a rotated log:
+  #   file: "~/Library/Logs/dsh-gateway/gateway.log"
+  file: ""
+  maxSizeMB: 16
 
 dsh:
   # Where the agent runs. There is one answer, and it is stated here rather than
