@@ -291,12 +291,19 @@ type Push struct {
 	// notifications get switched off.
 	TurnThreshold Duration `yaml:"turnThreshold"`
 	// IncludeSessionName puts the session's title — or, when it has none, the
-	// first line of the prompt that opened it — into the notification body.
+	// first line of the prompt that opened it — into a notification *body*, for
+	// the notifications whose body would otherwise name nobody: an approval, and
+	// an approval that expired.
 	//
 	// Off by default, because a notification body is not private the way the app
 	// is: it is rendered on a lock screen, stored by the operating system, and
 	// mirrored to any chat webhook that is configured. What it would carry is
 	// text the operator typed, so it is opt-in rather than assumed.
+	//
+	// It does not govern a message's *title*, which names the session either
+	// way: the title is the field a lock screen draws largest, and a
+	// notification that cannot say which conversation it is about is one the
+	// reader has to open to identify.
 	IncludeSessionName bool `yaml:"includeSessionName"`
 	// Webhooks are chat channels that receive the same notifications. They exist
 	// because Web Push on Android is Google's push service and nothing else, so a
@@ -375,6 +382,24 @@ type PushWebhook struct {
 	// URL is the bot's incoming-webhook address, which is a capability: anyone
 	// holding it can post to that chat.
 	URL string `yaml:"url"`
+	// IncludeAnswer puts the model's own closing message on the card, in full up
+	// to MaxAnswerChars.
+	//
+	// On by default, and the default is the point of the channel: a card that
+	// says which conversation finished and how long it took, but not what it
+	// concluded, sends the reader into the app to answer the only question they
+	// had. It is a pointer rather than a plain bool so that "false" is visibly a
+	// decision — a deployment posting into a group it shares with other people
+	// can turn it off, and one that never says anything gets the answer.
+	IncludeAnswer *bool `yaml:"includeAnswer"`
+	// MaxAnswerChars bounds how much of that answer one card prints. Zero takes
+	// the built-in budget (push.DefaultAnswerChars).
+	MaxAnswerChars int `yaml:"maxAnswerChars"`
+}
+
+// Answers reports whether this channel carries the model's closing message.
+func (w PushWebhook) Answers() bool {
+	return w.IncludeAnswer == nil || *w.IncludeAnswer
 }
 
 // Transcript controls reading of the persisted session log.

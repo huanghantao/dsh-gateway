@@ -749,11 +749,70 @@ push:
 ```
 
 A Feishu group bot needs no public callback: the gateway only makes an outbound
-HTTPS request, and the card it posts carries an *Open the session* button built
-from `publicURL`. Add the bot to the group (Group settings → Bots → Add bot →
+HTTPS request. Add the bot to the group (Group settings → Bots → Add bot →
 Custom bot), copy its webhook address, and press **Send a test notification** in
 the app's settings — it posts to the chat channel as well as to any browser that
 subscribed, and reports each one separately.
+
+**What the card says.** The session's own name is the title, because that is the
+largest text a chat client draws and the one fact that tells two cards apart. A
+small grey line under it carries the status and what the work amounted to:
+
+```
+┌────────────────────────────────────────────┐
+│ 现在我们的dsh gateway在子agent完            │ ← the session's name
+├────────────────────────────────────────────┤
+│ ✅ Completed · Main agent · 🕐 9m 37s · 5  │ ← status, small and grey
+│ tool calls                                  │
+│ ────────────────────────────────────────── │
+│ 已提交并推送。                              │ ← what the model answered
+│                                            │
+│ • 提交：`4b41a31` — Announce only the …     │
+│ • 推送：`33a4829..4b41a31 main -> main`     │
+│ ────────────────────────────────────────── │
+│ [ Open the session ]                       │
+└────────────────────────────────────────────┘
+```
+
+The body is the model's **own closing message** for the turn, printed as
+markdown. A notification that says which conversation finished but not what it
+concluded sends the reader into the app to answer the only question they had. Two
+ceilings apply, and both are stated in the card rather than applied quietly:
+
+* `maxAnswerChars` (default 4000) — an answer longer than this keeps its head and
+  its tail and says how many characters it dropped. Of 199 sessions on the
+  deployment this was measured against, half ended in under 30 characters and 97%
+  in under 3,000, so in practice the answer is printed whole.
+* The lock screen's copy of the same notification never carries the answer at
+  all: it has none of the room — a Web Push payload is sealed into 3000 bytes —
+  and none of the privacy, being read by whoever picks the phone up.
+
+Set `includeAnswer: false` on a webhook to go back to the one-line body, which is
+what a group that should not see model output wants. Set `maxAnswerChars` to
+bound one card by size instead.
+
+**Two card formats, chosen by asking.** The card is posted as
+[Feishu card JSON 2.0](https://open.feishu.cn/document/feishu-cards/card-json-v2-structure),
+whose `markdown` component renders what a model actually writes: headings, lists,
+tables and code blocks. The first-generation format's `lark_md` text element does
+not — it renders bold, links and mentions, and draws `##`, `|` and ```` ``` ````
+as literal characters, which turns an agent's answer into punctuation soup.
+
+Whether a given bot accepts 2.0 is not something this gateway can know offline, so
+it asks: the rich card is posted, and a service that refuses it is sent the plain
+one instead, with the answer folded into the subset `lark_md` can draw (headings
+become bold lines, tables become ` · `-joined rows, code keeps its text and loses
+its fences). The channel remembers the answer, so a deployment pays one refused
+request in total, and the refusal is logged with the service's own wording:
+
+```
+push: this chat service refused a card in the current format; using the plain one from now on
+    kind=feishu host=open.feishu.cn code=19001 reason=...
+```
+
+If you see that line, the cards in that group are the plain ones — the markdown
+rendering is the part that was given up, and everything else (the session name as
+the title, the answer as the body, the status line, the button) is unchanged.
 
 iOS is unaffected: Safari's Web Push goes through APNs, which is reachable, so an
 iPhone or iPad gets notifications without any of this.

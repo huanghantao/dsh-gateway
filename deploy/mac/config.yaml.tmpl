@@ -228,16 +228,27 @@ push:
   # chat, so it stays in this file.
   #
   # Off by default, and deliberately so: a webhook posts the notification in
-  # clear to whichever service it names, and the notification body carries the
-  # session's title (or, for a session that has none, the first line of the
-  # prompt that opened it). Enabling this is a decision to send that text to a
-  # third party, so it is not a decision to make on the operator's behalf.
+  # clear to whichever service it names, and the card carries the session's name
+  # as its title. Enabling this is a decision to send that text to a third party,
+  # so it is not a decision to make on the operator's behalf.
   #
-  # To turn it on, uncomment and replace the url with your own bot's incoming
-  # webhook. Only "feishu" is implemented today.
+  # A card is laid out as: the session's name as the title, a status line
+  # ("✅ Completed · Main agent · 🕐 9m 37s · 5 tool calls"), the model's own
+  # closing message as the body, and one button into the session. The answer is
+  # included unless includeAnswer is false; maxAnswerChars caps how much of it
+  # one card prints (default 4000, and the head and tail are kept when an answer
+  # is longer than that).
   webhooks: []
+  # - kind: feishu
+  #   url: "https://open.feishu.cn/open-apis/bot/v2/hook/…"
+  #   # Put the model's closing message on the card. On by default; set it to
+  #   # false for a group where the answer itself should not appear.
+  #   includeAnswer: true
+  #   # How much of that answer one card carries. 0 takes the built-in budget.
+  #   maxAnswerChars: 4000
 
-  # Whether a notification may name the session it is about.
+  # Whether a notification may name the session it is about, in the few bodies
+  # that would otherwise name nobody — an approval, and an approval that expired.
   #
   # Off by default. A notification body is the least private place this data
   # could go: it is rendered on a lock screen, kept by the operating system's
@@ -245,8 +256,10 @@ push:
   # puts the session's title there — or, for a session that has no title, the
   # first line of the prompt that opened it, which is text you typed.
   #
-  # A notification already says which *agent* settled and what the work amounted
-  # to; this is only about naming the conversation.
+  # The *title* of a notification names the session either way: it is the field a
+  # lock screen draws largest, and two notifications from two sessions are
+  # otherwise the same line of text. A notification already says which *agent*
+  # settled and what the work amounted to; this key is only about the body.
   includeSessionName: false
 
 # What the "tidy up" suggestion screen treats as a test run rather than work.

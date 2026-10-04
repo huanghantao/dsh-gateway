@@ -57,25 +57,30 @@ no amount of work on this end changes it. The VAPID subject is configurable
 (`push.subject`); set it to a real address you control, because some services
 require a contact and the shipped placeholder is not one.
 
-**What the notification says.** By default, nothing you wrote. A notification
-carries three facts — which agent settled (the session's own agent, or the
-gateway itself), how it went, and what the work amounted to as a count ("12 tool
-calls · 3 files changed · 2 delegations"). None of that is text you typed: it is
-either the harness's own vocabulary or a count of tool calls.
+**What the notification says.** A notification is titled with the session's own
+name, because a title is the one field a lock screen always draws and a
+notification that cannot say *which* conversation it is about is one the reader
+has to open to identify. For a session with no title the name falls back to the
+first line of the prompt that opened it. The rest of the lock-screen text is
+three facts — which agent settled (the session's own agent, or the gateway
+itself), how it went, and what the work amounted to as a count ("12 tool calls ·
+3 files changed · 2 delegations"). None of that is text you typed: it is either
+the harness's own vocabulary or a count of tool calls.
 
 A delegated child is not something a notification is about, so the one piece of
 generated text that used to reach a lock screen — the task description the model
 wrote for a child — no longer has a path there at all. It still appears in the
 app, on the settlement row for the child it belongs to.
 
-What is *not* in a notification by default is the session's title. That default
-exists because a notification is the least private place this data could go — it
-is rendered on a lock screen and retained by the operating system's notification
-store.
+**What a lock screen never carries** is the model's answer. A settled turn's
+closing message is the body of a *chat* card (see below); the push payload has
+none of the room for it — the record is capped at 3000 bytes — and none of the
+privacy, being read by whoever picks the phone up. The notifier does not even
+hold the text unless a chat channel has asked for it.
 
-Setting `push.includeSessionName: true` puts the session's title in the body. For
-a session with no title that falls back to the first line of the prompt that
-opened it. Turn it on only if you want your own words on your lock screen.
+Setting `push.includeSessionName: true` adds the session's title to the few
+notification *bodies* that would otherwise say it — the approval cards. It does
+not govern the title, which names the session either way.
 
 ### Chat webhooks
 
@@ -84,6 +89,15 @@ that shipped a placeholder Feishu hook. A webhook posts the notification in
 clear to whichever service it names —  the encryption above does not apply — so
 enabling one is a decision to send that text to a third party. It is not a
 decision this project should make on your behalf.
+
+A card posted to a group is the one place model output leaves this machine. Its
+body is the model's own closing message for the turn, printed as markdown, capped
+at `maxAnswerChars` (4000 by default, with the head, the tail and an exact count
+of what was dropped when an answer is longer). It is whatever the model wrote —
+which is to say whatever the files, the tools and the web put in front of it —
+and it is sent to a chat service that stores it and shows it to everyone in the
+group. Set `includeAnswer: false` on the webhook to keep the one-line body
+instead.
 
 If you do enable one, remember the webhook URL is a capability: anyone holding it
 can post into that chat. It is stored in `config.yaml` (0600) and never echoed

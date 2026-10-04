@@ -466,13 +466,26 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		pushNotifier *push.Notifier
 		pushChannels []push.Webhook
 	)
+	// answersWanted is whether any channel will print the model's closing
+	// message. When none will, the notifier does not collect it: the text is
+	// kilobytes per session, and a gateway whose notifications go to a lock
+	// screen has nowhere to put it.
+	answersWanted := false
 	for _, hook := range cfg.Push.Webhooks {
-		channel := push.Webhook{Kind: hook.Kind, URL: hook.URL}
+		channel := push.Webhook{
+			Kind:           hook.Kind,
+			URL:            hook.URL,
+			IncludeAnswer:  hook.Answers(),
+			MaxAnswerChars: hook.MaxAnswerChars,
+		}
 		if err := channel.Validate(); err != nil {
 			return fmt.Errorf("push.webhooks: %w", err)
 		}
 		channel.Open(logger, nil, cfg.PublicURL)
 		pushChannels = append(pushChannels, channel)
+		if channel.IncludeAnswer {
+			answersWanted = true
+		}
 	}
 
 	if cfg.Push.Enabled {
@@ -497,6 +510,11 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 			// have been put here. What still names the session is the *title*,
 			// which is what makes two notifications distinguishable at a glance.
 			IncludeSessionName: cfg.Push.IncludeSessionName,
+			// The answer is what a chat channel is for, and the lock screen can
+			// never carry it — a Web Push payload is capped at 3000 bytes and is
+			// the least private surface this data reaches. So it is collected
+			// exactly when a chat channel says it will print it.
+			KeepAnswers: answersWanted,
 			Describe: func(ctx context.Context, sessionID string) string {
 				if history == nil {
 					return ""

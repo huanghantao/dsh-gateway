@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/huanghantao/dsh-gateway/internal/logx"
@@ -20,10 +22,16 @@ import (
 // a phone whose network cannot reach it, or which has no Google Play services at
 // all, can never receive one. A group bot has its own delivery path, works on any
 // phone, and puts the notification somewhere the operator is already looking.
+//
+// This type is the *channel*: an address, a kind, and the HTTP that posts to it.
+// What a given service is shown lives beside it — feishu.go for the card, and
+// answer.go for how much of a model's answer any chat message may carry — so
+// that adding a provider is a new file plus a case in payload, not a new branch
+// in the transport.
 type Webhook struct {
 	// Kind selects the message format. Today only "feishu" is implemented; the
-	// field exists so that a second provider is a case in this file rather than
-	// a change to the configuration's shape.
+	// field exists so that a second provider is a case in payload rather than a
+	// change to the configuration's shape.
 	Kind string `yaml:"kind" json:"kind"`
 	// URL is the bot's incoming-webhook address. It is a capability: anyone
 	// holding it can post to that chat, so it lives with the other secrets and is
@@ -32,13 +40,75 @@ type Webhook struct {
 	// BaseURL is the public address of the gateway, used to turn a notification's
 	// relative link into one a chat client can open.
 	BaseURL string `yaml:"-" json:"-"`
+	// IncludeAnswer decides whether the card carries the model's own closing
+	// message instead of a one-line count of the work.
+	//
+	// It is a per-channel choice rather than a property of the notification,
+	// because the same turn is reported to a lock screen and to a chat group, and
+	// only one of those is a place a deployment may be willing to send model
+	// output: a group has other people in it, a chat service stores what it is
+	// sent, and the answer is the first text in a notification that the operator
+	// did not write and cannot predict. See NotifierOptions.KeepAnswers, which
+	// decides whether the text is collected at all — a channel cannot print what
+	// the notifier never kept.
+	IncludeAnswer bool `yaml:"includeAnswer" json:"includeAnswer"`
+	// MaxAnswerChars bounds how much of that answer one card prints. Zero takes
+	// the built-in budget, DefaultAnswerChars.
+	MaxAnswerChars int `yaml:"maxAnswerChars" json:"maxAnswerChars"`
 
 	logger *logx.Logger
 	client *http.Client
+	// state remembers what this channel's service accepts. It is a pointer so
+	// that copying a Webhook — which the configuration layer does, and which a
+	// struct holding a lock would make `go vet` refuse — shares one answer rather
+	// than forking it. Nil when Open was never called, which only happens in a
+	// test that is not sending anything.
+	state *channelState
+}
+
+// channelState is what a channel learns about its service while running.
+type channelState struct {
+	// plain is set once the service has refused a rich card, so the wedged
+	// format is not offered again on every notification.
+	plain atomic.Bool
+}
+
+// refusal is a chat service answering "no" to a card it understood.
+//
+// It is told apart from a transport failure on purpose: a timeout says nothing
+// about whether the card was well formed, and downgrading a channel because the
+// network blinked would silently cost the deployment its rich cards. Only an
+// answer from the service counts as a verdict on the format.
+type refusal struct {
+	host string
+	code int
+	msg  string
+}
+
+func (r *refusal) Error() string {
+	return fmt.Sprintf("push: %s refused the card: %s (code %d)", r.host, r.msg, r.code)
 }
 
 // KnownWebhookKinds are the providers this build can post to.
 var KnownWebhookKinds = []string{"feishu"}
+
+// cardFormat is which dialect of a provider's card to build.
+//
+// It exists because "does this chat service accept the newest card shape?" is not
+// a question this gateway can answer offline, and a wrong guess is not a
+// cosmetic failure: a refused card is a notification nobody gets. So the rich
+// format is attempted, a *refusal* downgrades this channel to the plain one, and
+// the answer is remembered — see Send.
+type cardFormat int
+
+const (
+	// cardRich is the current format: Feishu card JSON 2.0, whose markdown
+	// component renders what a model actually writes.
+	cardRich cardFormat = iota
+	// cardPlain is the first-generation format, which lark_md limits to bold,
+	// links and mentions. Its body is folded to fit; see flattenMarkdown.
+	cardPlain
+)
 
 // Validate checks a webhook before it is used.
 func (w Webhook) Validate() error {
@@ -76,14 +146,58 @@ func (w *Webhook) Open(logger *logx.Logger, client *http.Client, baseURL string)
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	w.client = client
+	w.state = &channelState{}
 }
 
 // Send posts one notification.
+//
+// The richest format the service accepts is the one that gets posted, and that is
+// decided by asking rather than by configuration: a rich card refused by the
+// service is retried as a plain one, and the channel remembers which it is for
+// every notification after that. The alternative — a `cardFormat` key the
+// operator has to get right — would be asking them to know a fact only the
+// service does, and getting it wrong means no notification at all.
 func (w *Webhook) Send(ctx context.Context, message Message) error {
 	if err := w.Validate(); err != nil {
 		return err
 	}
-	payload, err := w.payload(message)
+
+	if !w.isPlain() {
+		err := w.post(ctx, message, cardRich)
+		if err == nil {
+			return nil
+		}
+		var denied *refusal
+		if !errors.As(err, &denied) {
+			// The service never answered for the card, so it has said nothing
+			// about whether it understands it.
+			return err
+		}
+		w.usePlain(denied)
+	}
+	return w.post(ctx, message, cardPlain)
+}
+
+// isPlain reports whether this channel has been downgraded.
+func (w *Webhook) isPlain() bool {
+	return w.state != nil && w.state.plain.Load()
+}
+
+// usePlain records a refusal once, with the reason, so that the one line an
+// operator reads when their cards look plain explains why.
+func (w *Webhook) usePlain(denied *refusal) {
+	if w.state != nil {
+		w.state.plain.Store(true)
+	}
+	if w.logger != nil {
+		w.logger.Warn("push: this chat service refused a card in the current format; using the plain one from now on",
+			"kind", w.Kind, "host", denied.host, "code", denied.code, "reason", denied.msg)
+	}
+}
+
+// post builds one card and delivers it.
+func (w *Webhook) post(ctx context.Context, message Message, format cardFormat) error {
+	payload, err := w.payload(message, format)
 	if err != nil {
 		return err
 	}
@@ -104,7 +218,19 @@ func (w *Webhook) Send(ctx context.Context, message Message) error {
 	}()
 
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+	if response.StatusCode == http.StatusBadRequest {
+		// A 400 is the service saying it could not read the request, which for
+		// this caller means one thing: the card. It is a verdict on the format,
+		// so it downgrades — and it is the shape a card 2.0 is refused in by
+		// endpoints that do not answer with a JSON code. Verified against the
+		// live service: a 2.0 card sent with the wrong envelope comes back
+		// exactly this way, "parse card json err".
+		return &refusal{host: w.Host(), code: response.StatusCode, msg: strings.TrimSpace(string(body))}
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Everything else — a 401, a 429, a 500, a timeout — is not a statement
+		// about the card, and downgrading on one would cost the deployment its
+		// rich cards for a reason nobody could see.
 		return fmt.Errorf("push: %s answered %d: %s", w.Host(), response.StatusCode, bytes.TrimSpace(body))
 	}
 	// A chat webhook answers 200 with a body that says whether it accepted the
@@ -115,99 +241,27 @@ func (w *Webhook) Send(ctx context.Context, message Message) error {
 		Msg  string `json:"msg"`
 	}
 	if err := json.Unmarshal(body, &reply); err == nil && reply.Code != 0 {
-		return fmt.Errorf("push: %s refused the card: %s (code %d)", w.Host(), reply.Msg, reply.Code)
+		return &refusal{host: w.Host(), code: reply.Code, msg: reply.Msg}
 	}
 	return nil
 }
 
 // payload renders the message in the provider's format.
-func (w *Webhook) payload(message Message) ([]byte, error) {
+//
+// This switch is the whole extension point: a new chat service is two builders in
+// its own file named here, plus its name in KnownWebhookKinds and Validate. It is
+// deliberately the only place that knows a provider's name and its renderers at
+// once.
+func (w *Webhook) payload(message Message, format cardFormat) ([]byte, error) {
 	switch w.Kind {
 	case "feishu":
+		if format == cardPlain {
+			return w.feishuPlainPayload(message)
+		}
 		return w.feishuPayload(message)
 	default:
 		return nil, fmt.Errorf("push: unknown webhook kind %q", w.Kind)
 	}
-}
-
-// feishuPayload builds an interactive card.
-//
-// A card rather than plain text because of the button: the point of the
-// notification is to get the operator to the session, and a card can carry the
-// link as a control instead of a URL they have to select out of a paragraph.
-//
-// The card is also where the structured half of a message earns its keep: a chat
-// channel shows every notification, including the short turns Web Push stays
-// silent about, so a card that listed them without saying which agent had
-// settled and what it had done would be a wall of identical lines.
-func (w *Webhook) feishuPayload(message Message) ([]byte, error) {
-	colour := "blue"
-	switch {
-	case message.Outcome == "failed" || message.Outcome == "expired":
-		// The two outcomes that cost something: an approval expires and is
-		// refused, a failure leaves no result behind.
-		colour = "red"
-	case message.Outcome == "waiting" || strings.HasPrefix(message.Tag, "approval-"):
-		// An approval expires; the card says so in the only way a chat client
-		// lets us: colour.
-		colour = "orange"
-	}
-
-	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
-		"header": map[string]any{
-			"title":    map[string]any{"tag": "plain_text", "content": message.Title},
-			"template": colour,
-		},
-	}
-
-	elements := make([]any, 0, 3)
-	if detail := w.detailLine(message); detail != "" {
-		elements = append(elements, map[string]any{
-			"tag":  "div",
-			"text": map[string]any{"tag": "lark_md", "content": detail},
-		})
-	}
-	body := message.Body
-	if body == "" {
-		body = message.Title
-	}
-	elements = append(elements, map[string]any{
-		"tag":  "div",
-		"text": map[string]any{"tag": "lark_md", "content": body},
-	})
-
-	if link := w.absolute(message.URL); link != "" {
-		// Comma-ok rather than a bare assertion: errcheck is right that an
-		// assertion can panic, and the checked form costs nothing here.
-		elements = append(elements, map[string]any{
-			"tag": "action",
-			"actions": []any{map[string]any{
-				"tag":  "button",
-				"text": map[string]any{"tag": "plain_text", "content": "Open the session"},
-				"type": "primary",
-				"url":  link,
-			}},
-		})
-	}
-	card["elements"] = elements
-
-	return json.Marshal(map[string]any{"msg_type": "interactive", "card": card})
-}
-
-// detailLine is the line above the body: who settled, and what it amounted to.
-//
-// Empty when a message carries neither, so a hand-built notification — the test
-// button, for one — renders exactly as it did before this existed.
-func (w *Webhook) detailLine(message Message) string {
-	parts := make([]string, 0, 2)
-	if message.Actor != nil {
-		parts = append(parts, "**"+message.Actor.Label()+"**")
-	}
-	if summary := strings.TrimSpace(message.Summary); summary != "" {
-		parts = append(parts, summary)
-	}
-	return strings.Join(parts, " · ")
 }
 
 // absolute turns a notification's app-relative link into one a chat client can

@@ -69,9 +69,22 @@ func (s Subscription) Validate() error {
 // never what the work amounted to. The client is not required to read them — a
 // notification that only renders Title and Body is still correct — but a client
 // that does can group, filter and label what arrives.
+//
+// Title is the *name* of the thing this is about — a session's own name, or the
+// event when no session is involved ("The agent stopped"). It used to be a
+// sentence built from the outcome and the actor as well, which spent the largest
+// text a chat client draws on words the reader already knew, and left the one
+// fact that tells two notifications apart wrapped onto a second line. Those
+// words are now the status line and the footnote.
 type Message struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
+	// Answer is the model's own closing message for the turn — what the work
+	// concluded, in the words it concluded with.
+	//
+	// It is the reason a chat channel exists, and it is deliberately *not* part
+	// of the lock-screen payload: see forLockScreen.
+	Answer string `json:"answer,omitempty"`
 	// URL is where a tap should land, relative to the app's mount point.
 	URL string `json:"url,omitempty"`
 	// Tag collapses repeats: a second approval replaces the first notification
@@ -84,9 +97,36 @@ type Message struct {
 	Actor *Actor `json:"actor,omitempty"`
 	// Summary is what the work amounted to, when there is something to count.
 	Summary string `json:"summary,omitempty"`
+	// Model names the model that produced the answer, when a producer said so:
+	// the session log carries it, the live ACP path does not, so it is often
+	// absent rather than wrong.
+	Model string `json:"model,omitempty"`
 	// Outcome is the settled word — completed, failed, cancelled, expired —
 	// carried separately so a client can colour a row without parsing prose.
 	Outcome string `json:"outcome,omitempty"`
+	// DurationMS is how long the work ran, and it is zero when nobody knows:
+	// a turn this process attached to mid-flight has no start to subtract, and
+	// "0s" would be a claim rather than a silence.
+	DurationMS int64 `json:"durationMs,omitempty"`
+}
+
+// forLockScreen returns the message as the push channel may carry it.
+//
+// The answer is dropped here rather than at the call site, because this is the
+// one channel with a hard ceiling on what it can say and the one that is read by
+// whoever picks the phone up. Two facts decide it:
+//
+//   - Size. A Web Push payload is encrypted into a record of at most 3000 bytes
+//     (payloadLimit), and a model's answer is routinely longer than that on its
+//     own. A field that is sometimes absent and sometimes a 413 is worse than a
+//     field that is deliberately never there.
+//   - Audience. A lock screen is the least private surface this data reaches.
+//     The name and the outcome are enough to decide whether to open the app; the
+//     answer is read in the app, or in a chat channel the operator pointed at
+//     their own group.
+func (m Message) forLockScreen() Message {
+	m.Answer = ""
+	return m
 }
 
 // maxRecordSize is the plaintext record size advertised in the header. It is the

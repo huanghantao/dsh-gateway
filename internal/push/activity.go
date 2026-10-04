@@ -202,6 +202,11 @@ func normaliseTool(tool string) string {
 
 // clip shortens a label to a rune budget without cutting a multi-byte character
 // in half, and marks that it did.
+//
+// It collapses whitespace first, because everything it is used on — a session's
+// name, a one-line label — is a *title*, and a title with a newline in it draws
+// as two lines in a field that has room for one. Use keepShape for text whose
+// line breaks mean something.
 func clip(text string, limit int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if utf8.RuneCountInString(text) <= limit {
@@ -209,6 +214,22 @@ func clip(text string, limit int) string {
 	}
 	runes := []rune(text)
 	return strings.TrimSpace(string(runes[:limit])) + "…"
+}
+
+// keepShape shortens text to a rune budget without touching its whitespace.
+//
+// It exists because clip was once used on a model's answer, and an answer is
+// markdown: its line breaks *are* its structure. Collapsing them turned a
+// heading, a table and a list into one paragraph of punctuation — the card
+// arrived reading "## 结论| 步骤 | 结果 ||---|---|| 构建 |…", which the platform
+// then rendered as exactly that, because markdown needs the breaks to tell a
+// table from a sentence. The two functions sit one line apart so that the next
+// person picks the right one.
+func keepShape(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return strings.TrimSpace(string([]rune(text)[:limit])) + "…"
 }
 
 // plural renders a count with its noun, so "1 failure" is not "1 failures".

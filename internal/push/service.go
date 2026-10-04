@@ -168,8 +168,12 @@ func (s *Service) ForgetDevice(deviceID string) (int, error) {
 }
 
 // Send delivers one message to one subscription.
+//
+// What is encrypted is the lock-screen shape of the message, not the whole of
+// it: the answer a chat channel renders has no room in a 3000-byte record and no
+// business on a lock screen. See Message.forLockScreen.
 func (s *Service) Send(ctx context.Context, sub Subscription, message Message, urgency string) error {
-	payload, err := json.Marshal(message)
+	payload, err := json.Marshal(message.forLockScreen())
 	if err != nil {
 		return fmt.Errorf("push: encode message: %w", err)
 	}
