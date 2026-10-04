@@ -72,6 +72,21 @@ type DeviceStore interface {
 	// Revoke marks a device unusable. Revoking an unknown id returns
 	// errx.KindNotFound; revoking an already-revoked device is a no-op.
 	Revoke(ctx context.Context, id string) error
+	// Prune forgets every device whose credential expired before cutoff, and
+	// reports how many records went.
+	//
+	// Expiry stops a credential working; it does not remove the record. Without
+	// this the file is a log of every phone ever paired — re-pairing after the
+	// session TTL enrols a *new* id and leaves the old row behind, so the devices
+	// screen grows a dead entry per month and nothing ever takes one away. The
+	// cutoff is the caller's rather than a constant here because how long a dead
+	// record is worth showing is a retention decision, not a property of the
+	// file format.
+	//
+	// A revoked device is pruned on the same rule, not immediately: its record is
+	// the only evidence that the revocation happened, and the devices screen is
+	// where an operator goes to check.
+	Prune(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 // Device is one enrolled client.

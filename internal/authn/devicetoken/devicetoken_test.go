@@ -656,3 +656,93 @@ func TestConcurrentEnrollAndAuthenticate(t *testing.T) {
 		t.Errorf("List returned %d devices, want %d", len(list), workers+2)
 	}
 }
+
+// TestPruneForgetsOnlyCredentialsThatExpiredBeforeTheCutoff pins the rule that
+// stops devices.json from becoming a log of every phone ever paired.
+func TestPruneForgetsOnlyCredentialsThatExpiredBeforeTheCutoff(t *testing.T) {
+	s, _ := newTestStore(t)
+	c := newClock()
+	ctx := context.Background()
+
+	insert := func(id string, expiresAt time.Time, revoked bool) {
+		t.Helper()
+		if err := s.Insert(ctx, authn.Device{
+			ID:        id,
+			Name:      id,
+			TokenHash: HashToken(strings.Repeat("ab", TokenBytes)),
+			CreatedAt: c.now(),
+			LastSeen:  c.now(),
+			ExpiresAt: expiresAt,
+			Revoked:   revoked,
+		}); err != nil {
+			t.Fatalf("Insert(%s): %v", id, err)
+		}
+	}
+
+	insert("dev_long_dead", c.now().Add(-90*24*time.Hour), false)
+	insert("dev_dead_an_hour", c.now().Add(-time.Hour), false)
+	insert("dev_live", c.now().Add(24*time.Hour), false)
+	// Revoked, but its credential has not expired yet. The row is the only
+	// evidence the revocation happened, so it stays until its own expiry passes.
+	insert("dev_revoked_live", c.now().Add(24*time.Hour), true)
+
+	removed, err := s.Prune(ctx, c.now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("Prune removed %d devices, want 1", removed)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]bool{}
+	for _, d := range list {
+		got[d.ID] = true
+	}
+	for _, want := range []string{"dev_dead_an_hour", "dev_live", "dev_revoked_live"} {
+		if !got[want] {
+			t.Errorf("%s was pruned, but its credential had not been dead for the whole grace period", want)
+		}
+	}
+	if got["dev_long_dead"] {
+		t.Error("a device whose credential expired 90 days ago is still in the store: " +
+			"re-pairing after the session TTL leaves one of these behind every time")
+	}
+}
+
+// TestAPrunedDeviceStaysForgottenAcrossARestart is the half that matters for a
+// file-backed store: dropping the record from memory is not the fix, removing it
+// from the document is.
+func TestAPrunedDeviceStaysForgottenAcrossARestart(t *testing.T) {
+	s, path := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Insert(ctx, authn.Device{
+		ID:        "dev_old",
+		Name:      "an old phone",
+		TokenHash: HashToken(strings.Repeat("ab", TokenBytes)),
+		CreatedAt: time.Unix(1_600_000_000, 0),
+		ExpiresAt: time.Unix(1_600_000_000, 0).Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	if _, err := s.Prune(ctx, time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	list, err := reopened.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("the store came back with %d devices after a prune and a reopen, want 0", len(list))
+	}
+}

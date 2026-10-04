@@ -154,6 +154,35 @@ func (s *Store) Revoke(_ context.Context, id string) error {
 	return s.flushLocked()
 }
 
+// Prune implements authn.DeviceStore.
+//
+// It is the only method here that removes a record rather than editing one. The
+// file is rewritten once for the whole sweep instead of once per device, so
+// forgetting a year of re-pairings costs one write — the same one `Touch` would
+// have spent anyway.
+func (s *Store) Prune(_ context.Context, cutoff time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	removed := 0
+	for id, d := range s.devices {
+		// Before, not !After: a device that expired exactly at the cutoff has
+		// been dead for the whole grace period, and the boundary should not
+		// depend on which side of a nanosecond the caller's clock landed.
+		if d.ExpiresAt.Before(cutoff) {
+			delete(s.devices, id)
+			removed++
+		}
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := s.flushLocked(); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
 // flushLocked persists the document. The caller must hold s.mu for writing.
 func (s *Store) flushLocked() error {
 	doc := document{Version: storeVersion, Devices: make([]authn.Device, 0, len(s.devices))}
