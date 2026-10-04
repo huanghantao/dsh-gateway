@@ -144,15 +144,21 @@ func TestTrashPurgesOnlyWhatIsOld(t *testing.T) {
 	}
 
 	// A day later nothing is purged...
-	if purged, err := trash.Purge(30*24*time.Hour, entry.DeletedAt.Add(24*time.Hour)); err != nil || purged != 0 {
-		t.Fatalf("purge after a day removed %d entry(ies) (err %v), want none", purged, err)
+	if purged, err := trash.Purge(30*24*time.Hour, entry.DeletedAt.Add(24*time.Hour)); err != nil || len(purged) != 0 {
+		t.Fatalf("purge after a day removed %d entry(ies) (err %v), want none", len(purged), err)
 	}
 	if len(trash.List()) != 1 {
 		t.Fatal("the entry vanished before its time")
 	}
-	// ...and after the grace period it is gone for good.
-	if purged, err := trash.Purge(30*24*time.Hour, entry.DeletedAt.Add(31*24*time.Hour)); err != nil || purged != 1 {
-		t.Fatalf("purge after the grace period removed %d (err %v), want 1", purged, err)
+	// ...and after the grace period it is gone for good. The entries come back
+	// rather than a count, because the caller has to forget the state it kept
+	// under those ids.
+	purged, err := trash.Purge(30*24*time.Hour, entry.DeletedAt.Add(31*24*time.Hour))
+	if err != nil || len(purged) != 1 {
+		t.Fatalf("purge after the grace period removed %d (err %v), want 1", len(purged), err)
+	}
+	if purged[0].SessionID != testSession {
+		t.Errorf("purged %q, want %q", purged[0].SessionID, testSession)
 	}
 	if len(trash.List()) != 0 {
 		t.Error("a purged entry is still listed")

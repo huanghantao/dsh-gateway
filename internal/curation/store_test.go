@@ -1,6 +1,7 @@
 package curation_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -164,5 +165,67 @@ func TestDeskIsRereadWhenItChanges(t *testing.T) {
 	}
 	if !s.Hide("session-later") {
 		t.Error("an archive made at the desk after the gateway started was not picked up")
+	}
+}
+
+// TestForgetDropsEveryDecisionAboutASession is the only way an id leaves the
+// overlay.
+//
+// Archive and Pin move an id between the two lists of a pair; neither removes
+// one. So a session deleted for good — which is what the trash purge does —
+// would otherwise be named by this file for as long as the state directory
+// exists, and nothing would ever read those ids again.
+func TestForgetDropsEveryDecisionAboutASession(t *testing.T) {
+	stateDir := t.TempDir()
+	s := open(t, stateDir, "")
+
+	// One id in each of the four lists, because they are four different fields
+	// and a Forget that missed one would leave the id behind in the file.
+	ids := []string{"session-archived", "session-unarchived", "session-pinned", "session-unpinned"}
+	if _, err := s.Archive(ids[:1], true); err != nil {
+		t.Fatalf("Archive(true): %v", err)
+	}
+	if _, err := s.Archive(ids[1:2], false); err != nil {
+		t.Fatalf("Archive(false): %v", err)
+	}
+	if _, err := s.Pin(ids[2:3], true); err != nil {
+		t.Fatalf("Pin(true): %v", err)
+	}
+	if _, err := s.Pin(ids[3:], false); err != nil {
+		t.Fatalf("Pin(false): %v", err)
+	}
+
+	removed, err := s.Forget(ids)
+	if err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if removed != len(ids) {
+		t.Errorf("Forget reported %d removal(s), want %d", removed, len(ids))
+	}
+	for _, id := range ids {
+		if d := s.Decision(id); d.Archived || d.Pinned {
+			t.Errorf("%s still carries a decision after being forgotten: %+v", id, d)
+		}
+	}
+
+	// State, not a cache: the file itself must no longer name them.
+	raw, err := os.ReadFile(filepath.Join(stateDir, "curation.json"))
+	if err != nil {
+		t.Fatalf("read overlay: %v", err)
+	}
+	for _, id := range ids {
+		if bytes.Contains(raw, []byte(id)) {
+			t.Errorf("the overlay still names %s after it was forgotten", id)
+		}
+	}
+
+	// Forgetting something that was never recorded is a no-op, not an error and
+	// not a rewrite.
+	again, err := open(t, stateDir, "").Forget([]string{"session-never-seen"})
+	if err != nil {
+		t.Fatalf("Forget(unknown): %v", err)
+	}
+	if again != 0 {
+		t.Errorf("Forget(unknown) reported %d removal(s), want 0", again)
 	}
 }

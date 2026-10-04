@@ -187,6 +187,28 @@ func (s *Store) Pin(sessionIDs []string, pinned bool) (int, error) {
 	})
 }
 
+// Forget drops every decision about the given sessions, and reports how many
+// ids actually went.
+//
+// Archive and Pin only ever *move* an id between the two lists of a pair, so
+// without this the overlay is append-only: a session deleted for good leaves its
+// ids behind, and the file grows for the life of the state directory. It is
+// called when the trash purges a session permanently, and deliberately not when
+// one is merely trashed — a restored session is supposed to come back with the
+// decisions it had.
+func (s *Store) Forget(sessionIDs []string) (int, error) {
+	return s.update(sessionIDs, func(o *overlay, id string) bool {
+		removed := false
+		for _, list := range []*[]string{&o.Archived, &o.Unarchived, &o.Pinned, &o.Unpinned} {
+			if contains(*list, id) {
+				*list = remove(*list, id)
+				removed = true
+			}
+		}
+		return removed
+	})
+}
+
 // update applies a change to every id and writes once, so a bulk action is one
 // atomic file write rather than one per session.
 func (s *Store) update(sessionIDs []string, change func(*overlay, string) bool) (int, error) {

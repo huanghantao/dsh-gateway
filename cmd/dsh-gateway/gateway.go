@@ -22,6 +22,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
 	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
+	"github.com/huanghantao/dsh-gateway/internal/atomicfile"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
 	"github.com/huanghantao/dsh-gateway/internal/authn/ratelimit"
@@ -94,11 +95,23 @@ func runGateway(args []string) error {
 		return err
 	}
 
-	logger := logx.New(os.Stderr, logx.Config{
+	logger, closeLog, logErr := logx.Open(logx.Config{
 		Level:     cfg.Log.Level,
 		Format:    logx.Format(cfg.Log.Format),
 		AddSource: cfg.Log.AddSource,
+		File:      cfg.Log.File,
+		MaxBytes:  int64(cfg.Log.MaxSizeMB) << 20,
 	})
+	defer func() { _ = closeLog() }()
+	if logErr != nil {
+		// Not fatal: a phone that cannot be driven is worse than a log that could
+		// not be opened, and the message itself lands on stderr, where the
+		// supervisor will still capture it.
+		logger.Warn("could not open the log file; logging to stderr",
+			"file", cfg.Log.File, "error", logErr.Error())
+	} else if cfg.Log.File != "" {
+		logger.Info("logging to file", "file", cfg.Log.File, "maxSizeMB", cfg.Log.MaxSizeMB)
+	}
 	// Naming the file that was actually read removes the most common cause of
 	// "my change had no effect": editing a different config.yaml than the one in
 	// use.
@@ -202,6 +215,16 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		return fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
 
+	// Every document under the state directory is written by a temp-file-and-
+	// rename, so a write the process did not survive leaves the temp behind and
+	// nothing else ever looks at it. This is the one moment it is safe to: no
+	// writer of ours is running yet.
+	if removed, err := atomicfile.SweepTemp(cfg.StateDir, time.Now()); err != nil {
+		logger.Warn("could not sweep stale temporary files", "error", err.Error())
+	} else if removed > 0 {
+		logger.Info("removed stale temporary files", "files", removed)
+	}
+
 	// --- security spine -----------------------------------------------------
 
 	devices, err := devicetoken.Open(filepath.Join(cfg.StateDir, "devices.json"))
@@ -209,6 +232,10 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		return err
 	}
 	authenticator := devicetoken.New(devices, cfg.Auth.SessionTTL.Std(), time.Now)
+
+	// Before anything can enrol another one: a re-pairing after the session TTL
+	// writes a fresh record, and without this the old one stays forever.
+	pruneDevices(ctx, devices, logger)
 
 	limiter := ratelimit.New(ratelimit.Config{
 		PerSecond:    cfg.Auth.RequestsPerSecond,
@@ -418,6 +445,10 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 	// Deletions from the phone are moves into here, and this is the only place
 	// that ever removes one for good.
 	var trash *sessionlog.Trash
+	// What a startup purge removed for good. The curation overlay is opened a
+	// few lines below, and a session that is gone has no decisions left to
+	// remember, so its ids are dropped there rather than kept forever.
+	var purgedFromTrash []sessionlog.Entry
 	if history != nil {
 		trash, err = sessionlog.OpenTrash(history, filepath.Join(cfg.StateDir, "trash"))
 		if err != nil {
@@ -425,8 +456,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		}
 		if purged, err := trash.Purge(trashGrace, time.Now()); err != nil {
 			logger.Warn("could not purge the trash", "error", err.Error())
-		} else if purged > 0 {
-			logger.Info("purged expired trash", "sessions", purged)
+		} else if len(purged) > 0 {
+			logger.Info("purged expired trash", "sessions", len(purged))
+			purgedFromTrash = purged
 		}
 	}
 
@@ -441,6 +473,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 	})
 	if err != nil {
 		return err
+	}
+	if len(purgedFromTrash) > 0 {
+		forgetPurged(curationStore, purgedFromTrash, logger)
 	}
 
 	// Triage's idea of "a test" is portable by default, and a deployment whose
@@ -666,8 +701,9 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 
 	go leases.Run(ctx)
 	go sweepLimiter(ctx, limiter)
+	go pruneDevicesDaily(ctx, devices, logger)
 	if trash != nil {
-		go purgeTrashDaily(ctx, trash, logger)
+		go purgeTrashDaily(ctx, trash, curationStore, logger)
 	}
 	if pushNotifier != nil {
 		go pushNotifier.Run(ctx)
@@ -807,6 +843,46 @@ func sweepLimiter(ctx context.Context, limiter *ratelimit.Limiter) {
 	}
 }
 
+// deviceGrace is how long a dead device record is kept after its credential
+// stopped working.
+//
+// The record is what the devices screen draws, and a revoked phone's row is the
+// evidence that the revocation happened — so it is worth keeping for a while
+// after it stops being usable, and worth nothing after that. Thirty days matches
+// the trash: a month is long enough that nobody is still coming back for it.
+const deviceGrace = 30 * 24 * time.Hour
+
+// pruneDevices forgets device records whose credential expired long enough ago
+// that the row is history rather than information.
+func pruneDevices(ctx context.Context, devices *devicetoken.Store, logger *logx.Logger) {
+	removed, err := devices.Prune(ctx, time.Now().Add(-deviceGrace))
+	if err != nil {
+		logger.Warn("could not forget expired devices", "error", err.Error())
+		return
+	}
+	if removed > 0 {
+		logger.Info("forgot expired devices", "devices", removed)
+	}
+}
+
+// pruneDevicesDaily runs the sweep once a day, and once at startup.
+//
+// Daily rather than in proportion to the grace: nothing depends on the exact
+// moment a dead record goes, and a device that expired a month ago is not
+// urgent.
+func pruneDevicesDaily(ctx context.Context, devices *devicetoken.Store, logger *logx.Logger) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pruneDevices(ctx, devices, logger)
+		}
+	}
+}
+
 // trashGrace is how long a deleted session stays recoverable.
 //
 // Long enough that a mistake is noticed (a month is what a phone's own photo
@@ -815,7 +891,7 @@ func sweepLimiter(ctx context.Context, limiter *ratelimit.Limiter) {
 const trashGrace = 30 * 24 * time.Hour
 
 // purgeTrashDaily removes expired deletions once a day, and once at startup.
-func purgeTrashDaily(ctx context.Context, trash *sessionlog.Trash, logger *logx.Logger) {
+func purgeTrashDaily(ctx context.Context, trash *sessionlog.Trash, curated *curation.Store, logger *logx.Logger) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
@@ -828,9 +904,32 @@ func purgeTrashDaily(ctx context.Context, trash *sessionlog.Trash, logger *logx.
 				logger.Warn("could not purge the trash", "error", err.Error())
 				continue
 			}
-			if purged > 0 {
-				logger.Info("purged expired trash", "sessions", purged)
+			if len(purged) > 0 {
+				logger.Info("purged expired trash", "sessions", len(purged))
+				forgetPurged(curated, purged, logger)
 			}
 		}
+	}
+}
+
+// forgetPurged drops the curation decisions of sessions the trash has removed
+// for good.
+//
+// A purge is the one deletion that is final, so it is the one moment these ids
+// become unreachable: the overlay has no other way to shed them, and its lists
+// would otherwise name sessions that no longer exist for as long as the state
+// directory does.
+func forgetPurged(curated *curation.Store, purged []sessionlog.Entry, logger *logx.Logger) {
+	ids := make([]string, 0, len(purged))
+	for _, entry := range purged {
+		ids = append(ids, entry.SessionID)
+	}
+	removed, err := curated.Forget(ids)
+	if err != nil {
+		logger.Warn("could not forget the archived state of purged sessions", "error", err.Error())
+		return
+	}
+	if removed > 0 {
+		logger.Info("forgot curation decisions for purged sessions", "ids", removed)
 	}
 }

@@ -160,14 +160,19 @@ func (t *Trash) Restore(sessionID string) (Entry, error) {
 	return Entry{}, errx.New(errx.KindNotFound, "not_in_trash", "that session is not in the trash")
 }
 
-// Purge removes trash entries older than maxAge and reports how many went.
+// Purge removes trash entries older than maxAge and returns what it removed for
+// good.
 //
 // This is the only place that deletes anything, and it is deliberately the one
 // that a phone cannot reach: what the operator asked for was "get this out of my
 // list", and the answer to that is a month of grace, not a cron job with a
 // button.
-func (t *Trash) Purge(maxAge time.Duration, now time.Time) (int, error) {
-	purged := 0
+//
+// It returns the entries rather than a count because the deletion is permanent:
+// a caller that keeps state keyed by session — the curation overlay, for one —
+// has to forget them at the same moment, and re-listing the trash would race.
+func (t *Trash) Purge(maxAge time.Duration, now time.Time) ([]Entry, error) {
+	purged := make([]Entry, 0)
 	for _, entry := range t.List() {
 		if now.Sub(entry.DeletedAt) < maxAge {
 			continue
@@ -175,7 +180,7 @@ func (t *Trash) Purge(maxAge time.Duration, now time.Time) (int, error) {
 		if err := os.RemoveAll(entry.Path); err != nil {
 			return purged, fmt.Errorf("sessionlog: purge %s: %w", entry.SessionID, err)
 		}
-		purged++
+		purged = append(purged, entry)
 	}
 	// Tidy up the directories a purge emptied. `os.Remove` — not `RemoveAll` —
 	// is the point: it refuses a directory that still holds something, which is
@@ -216,7 +221,7 @@ func (s *Store) forget(sessionID string) {
 	defer s.mu.Unlock()
 	delete(s.cache, sessionID)
 	delete(s.metas, sessionID)
-	delete(s.paths, sessionID)
+	s.forgetPathLocked(sessionID)
 }
 
 // Dir returns the directory a session's log lives in.
