@@ -230,8 +230,9 @@ func TestExpiryRefusesAndSaysSo(t *testing.T) {
 	defer sub.Close()
 
 	// The wait is bounded by the caller's context, which is how the ACP adapter
-	// applies session.approvalTimeout: the broker's own Timeout only fills in an
-	// ExpiresAt the harness did not supply.
+	// applies session.approvalTimeout in-process. The broker's own deadline is
+	// the second, independent bound, and it is what covers the relayed path; see
+	// the test below.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
@@ -272,6 +273,67 @@ func TestExpiryRefusesAndSaysSo(t *testing.T) {
 	}
 	if resolved.Tool != "bash" {
 		t.Errorf("tool = %q, want the tool that was refused; a client cannot look it up afterwards", resolved.Tool)
+	}
+}
+
+// TestAnApprovalExpiresOnItsOwnDeadlineWhenTheContextOutlivesIt is the relayed
+// path, and the reason the broker cannot lean on its caller.
+//
+// A permission request that arrives from the agent host is handled under that
+// connection's context, which is meant to live for months. Waiting only on the
+// context therefore means a prompt nobody answers is never resolved: the card
+// stays in every snapshot, no "approval expired" notification is ever sent, and
+// the handler goroutine stays parked until the socket drops.
+func TestAnApprovalExpiresOnItsOwnDeadlineWhenTheContextOutlivesIt(t *testing.T) {
+	bus := events.New(events.Config{Replay: 64, Queue: 64})
+	broker := approvals.New(approvals.Options{
+		Timeout: 30 * time.Millisecond, Bus: bus, Logger: logx.Discard(),
+	})
+	defer broker.Close()
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
+	defer sub.Close()
+
+	// Deliberately a context that never ends: this stands in for the agent-host
+	// connection, and it is the whole point of the test.
+	done := make(chan error, 1)
+	go func() {
+		_, err := broker.RequestPermission(context.Background(), harness.PermissionRequest{
+			ID: "apr_relayed", SessionID: "session-1", Tool: "bash", Input: "{}",
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if errx.CodeOf(err) != "approval_timeout" {
+			t.Fatalf("err = %v (code %q), want an approval_timeout refusal", err, errx.CodeOf(err))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the approval never expired: the broker waited on a context that does not end")
+	}
+
+	// The entry must be gone. Leaving it is what puts a dead card in every
+	// snapshot for the life of the connection, and what makes tapping it answer
+	// 409 from a host that gave up long ago.
+	if view, ok := broker.Get("apr_relayed"); ok {
+		t.Errorf("the expired approval is still pending: %+v", view)
+	}
+
+	var resolved *events.ApprovalDecision
+	for len(sub.Events()) > 0 {
+		e := <-sub.Events()
+		if e.Type != events.TypeApprovalResolved {
+			continue
+		}
+		if decision, ok := e.Data.(events.ApprovalDecision); ok {
+			resolved = &decision
+		}
+	}
+	if resolved == nil {
+		t.Fatal("an approval that expired on its own deadline published no resolution")
+	}
+	if resolved.DecidedBy != "timeout" || resolved.OptionID != harness.OptionRejectOnce {
+		t.Errorf("resolution = %+v, want a timeout refusal", resolved)
 	}
 }
 

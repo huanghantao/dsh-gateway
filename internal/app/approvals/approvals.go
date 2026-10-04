@@ -110,9 +110,13 @@ func New(opts Options) *Broker {
 
 // RequestPermission implements harness.PermissionHandler.
 //
-// It blocks until a human decides, a standing grant answers, or the context
-// expires. On expiry it returns an error, which the harness adapter turns into a
-// refusal — the tool does not run.
+// It blocks until a human decides, a standing grant answers, or the approval's
+// deadline passes. On expiry it returns an error, which the harness adapter turns
+// into a refusal — the tool does not run.
+//
+// The deadline is the broker's own, not only the caller's: a request that arrives
+// over the agent-host socket carries that connection's context, which outlives
+// any approval, so waiting on the context alone would mean waiting forever.
 func (b *Broker) RequestPermission(ctx context.Context, req harness.PermissionRequest) (harness.PermissionDecision, error) {
 	view := b.buildView(req)
 
@@ -161,6 +165,28 @@ func (b *Broker) RequestPermission(ctx context.Context, req harness.PermissionRe
 		b.mu.Unlock()
 	}()
 
+	// The wait is bounded twice on purpose, and neither bound substitutes for
+	// the other.
+	//
+	// The caller's context is the in-process path: the ACP adapter hands down an
+	// approval deadline with it and expects a refusal once it passes. The timer
+	// below covers the other path, where a permission request is relayed from
+	// the agent host: that context belongs to the *connection*, which is meant to
+	// live for months, so it can never expire an approval. Without the timer a
+	// prompt nobody answers is never resolved at all — the card stays in every
+	// snapshot, the operator never gets told the tool was refused, and this
+	// goroutine stays parked until the socket drops.
+	//
+	// It reads the deadline the view already carries rather than b.timeout,
+	// because the requester may have named an earlier one and that promise is
+	// the one on screen.
+	wait := view.ExpiresAt.Sub(b.now())
+	if wait < 0 {
+		wait = 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
 	select {
 	case d := <-w.answer:
 		if d.DecidedBy == "" {
@@ -172,20 +198,29 @@ func (b *Broker) RequestPermission(ctx context.Context, req harness.PermissionRe
 		})
 		return d, nil
 
+	case <-timer.C:
+		return b.expire(view)
+
 	case <-ctx.Done():
-		// Fail closed. Announce the refusal so every client dismisses the sheet
-		// instead of leaving a dead prompt on screen — and so the operator, who
-		// may have missed the notification that opened it, learns that the tool
-		// did not run.
-		b.bus.Publish(events.TypeApprovalResolved, view.SessionID, events.ApprovalDecision{
-			ID: view.ID, OptionID: harness.OptionRejectOnce, DecidedBy: "timeout",
-			Tool: view.Tool, SessionID: view.SessionID,
-		})
-		b.logger.Warn("approval expired without a decision; refusing",
-			"approval", view.ID, "session", view.SessionID, "tool", view.Tool)
-		return harness.PermissionDecision{}, errx.New(errx.KindTimeout, "approval_timeout",
-			"nobody answered the approval request in time, so the tool was refused")
+		return b.expire(view)
 	}
+}
+
+// expire refuses an approval nobody answered in time, and says so out loud.
+//
+// Fail closed, and announce it: the refusal is what dismisses the sheet on every
+// client instead of leaving a dead prompt on screen, it is what tells an operator
+// who missed the notification that the tool did not run, and it is what the push
+// notifier turns into "Approval expired".
+func (b *Broker) expire(view View) (harness.PermissionDecision, error) {
+	b.bus.Publish(events.TypeApprovalResolved, view.SessionID, events.ApprovalDecision{
+		ID: view.ID, OptionID: harness.OptionRejectOnce, DecidedBy: "timeout",
+		Tool: view.Tool, SessionID: view.SessionID,
+	})
+	b.logger.Warn("approval expired without a decision; refusing",
+		"approval", view.ID, "session", view.SessionID, "tool", view.Tool)
+	return harness.PermissionDecision{}, errx.New(errx.KindTimeout, "approval_timeout",
+		"nobody answered the approval request in time, so the tool was refused")
 }
 
 // buildView renders a request for the wire and decides which choices to offer.
