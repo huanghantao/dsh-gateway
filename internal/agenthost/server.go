@@ -51,6 +51,14 @@ type Options struct {
 	// one. The host enforces it rather than the caller, because a turn must not
 	// be cancelled for the convenience of the process that asked for it.
 	TurnTimeout time.Duration
+	// TurnResultRetention is how long a settled turn stays awaitable.
+	//
+	// A settled result is kept rather than delivered once, so that a gateway
+	// which restarted mid-turn reconnects and asks for an outcome it never saw.
+	// In practice that window is seconds. Without a bound, though, the table
+	// becomes a record of every turn this process has ever run — and this process
+	// is built to outlive many gateway redeploys, so "ever" is months.
+	TurnResultRetention time.Duration
 	// PermissionTimeout bounds how long a tool call waits for a person. On
 	// expiry the host refuses the tool, which is the same fail-closed rule the
 	// gateway applies in-process.
@@ -91,9 +99,12 @@ type Server struct {
 	sessions   map[string]*session
 
 	// turns indexes running and settled turns by id, so a gateway that
-	// reconnects can rejoin one it started.
-	turnsMu sync.Mutex
-	turns   map[string]*turn
+	// reconnects can rejoin one it started. It is bounded rather than a log:
+	// every entry is either running (bounded by TurnTimeout) or settled and on
+	// its way out. See rememberSettled.
+	turnsMu   sync.Mutex
+	turns     map[string]*turn
+	turnOrder []*turn
 
 	drainOnce sync.Once
 	draining  atomic.Bool
@@ -154,6 +165,9 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.PermissionTimeout <= 0 {
 		opts.PermissionTimeout = 5 * time.Minute
+	}
+	if opts.TurnResultRetention <= 0 {
+		opts.TurnResultRetention = time.Hour
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -785,12 +799,46 @@ func (s *Server) runTurn(ctx context.Context, sess *session, t *turn, blocks []h
 	s.sessionsMu.Unlock()
 
 	t.finish(result)
+	s.rememberSettled(t)
 	s.logger.Info("turn settled",
 		"session", t.sessionID, "turn", t.id,
 		"cancelled", cancelled, "error", errorText(err))
 
 	if conn := s.current(); conn != nil {
 		_ = conn.Notify(hostwire.MethodTurnResult, result)
+	}
+}
+
+// rememberSettled keeps a settled turn awaitable for the retention window, and
+// forgets the results that have aged out.
+//
+// The order slice is what makes the sweep cheap: it is appended in settlement
+// order, so the oldest result is at its head and nothing has to scan the map.
+// Settlement order is not admission order — two sessions run at once — so the
+// window is approximate rather than exact, which is the right trade for a bound
+// whose job is to stop a record of every turn the process ever ran.
+//
+// A sweep runs when a turn settles, so a host that goes quiet keeps whatever was
+// in its last window. That set is bounded by the busiest hour of its life, which
+// is the point; it is not a growing record.
+func (s *Server) rememberSettled(t *turn) {
+	s.turnsMu.Lock()
+	defer s.turnsMu.Unlock()
+
+	s.turnOrder = append(s.turnOrder, t)
+
+	cutoff := s.now().Add(-s.opts.TurnResultRetention)
+	for len(s.turnOrder) > 0 {
+		oldest := s.turnOrder[0]
+		// The settle time was written under the turn's own lock before this
+		// goroutine took turnsMu, and every earlier settlement did the same, so
+		// reading it here is ordered rather than racy.
+		if oldest.result.SettledAt.After(cutoff) {
+			break
+		}
+		delete(s.turns, oldest.id)
+		s.turnOrder[0] = nil // let the result go rather than pinning it in the array
+		s.turnOrder = s.turnOrder[1:]
 	}
 }
 

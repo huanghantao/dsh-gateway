@@ -703,3 +703,96 @@ func TestClientReportsHostStateToTheGateway(t *testing.T) {
 	}
 	t.Fatal("the gateway was never told the child restarted")
 }
+
+// TestASettledTurnIsForgottenAfterItsRetentionWindow bounds the turn table.
+//
+// A settled result is kept so a gateway that restarted mid-turn can ask for the
+// outcome it never saw. Kept *forever*, though, the table becomes a record of
+// every turn this process has run — and this process is designed to outlive many
+// gateway redeploys, so "forever" is months. The clock is injected so the window
+// is crossed without sleeping through it.
+func TestASettledTurnIsForgottenAfterItsRetentionWindow(t *testing.T) {
+	const retention = time.Minute
+
+	at := time.Unix(1_700_000_000, 0)
+	child := newStubHarness()
+	srv, err := New(Options{
+		NewHarness: func(harness.UpdateSink, harness.PermissionHandler, harness.StateSink) (harness.Harness, error) {
+			return child, nil
+		},
+		Logger:              logx.Discard(),
+		TurnResultRetention: retention,
+		Now:                 func() time.Time { return at },
+	})
+	if err != nil {
+		t.Fatalf("agenthost.New: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Close(context.Background()) })
+
+	// settle is what runTurn does at the end of a turn: publish the result, then
+	// offer it to the retention sweep.
+	settle := func(id string) {
+		t.Helper()
+		turn := &turn{id: id, sessionID: "session-1", settled: make(chan struct{})}
+		turn.finish(hostwire.TurnResult{TurnID: id, SessionID: "session-1", SettledAt: at})
+		srv.turnsMu.Lock()
+		srv.turns[id] = turn
+		srv.turnsMu.Unlock()
+		srv.rememberSettled(turn)
+	}
+
+	held := func() int {
+		srv.turnsMu.Lock()
+		defer srv.turnsMu.Unlock()
+		return len(srv.turns)
+	}
+
+	settle("turn_1")
+	if held() != 1 {
+		t.Fatalf("turns held = %d, want 1: a settled turn must be awaitable right after it settles", held())
+	}
+
+	// Inside the window, nothing goes.
+	at = at.Add(retention / 2)
+	settle("turn_2")
+	if held() != 2 {
+		t.Errorf("turns held = %d, want 2: a result inside the window was forgotten too early", held())
+	}
+
+	// Past the window, the settled ones go and the newest stays.
+	at = at.Add(retention)
+	settle("turn_3")
+	if held() != 1 {
+		t.Errorf("turns held = %d, want 1: results older than the window are still being kept", held())
+	}
+	srv.turnsMu.Lock()
+	_, stillThere := srv.turns["turn_3"]
+	srv.turnsMu.Unlock()
+	if !stillThere {
+		t.Error("the turn that just settled was swept: the sweep must keep the window it promises, not empty the table")
+	}
+
+	// The point of the bound: a long-lived host does not grow with its history.
+	// One turn per second against a one-minute window is sixty results — the
+	// number to hold flat, not the one to shrink.
+	const inWindow = int(retention/time.Second) + 2
+	for i := 0; i < 500; i++ {
+		at = at.Add(time.Second)
+		settle(fmt.Sprintf("turn_%d", i))
+	}
+	if n := held(); n > inWindow {
+		t.Errorf("turns held = %d after 500 turns, want at most %d: the table grows with the host's history",
+			n, inWindow)
+	}
+
+	// A second history of the same length must not move it: what is held is the
+	// window, not the count.
+	before := held()
+	for i := 500; i < 1000; i++ {
+		at = at.Add(time.Second)
+		settle(fmt.Sprintf("turn_%d", i))
+	}
+	if after := held(); after > before {
+		t.Errorf("turns held went from %d to %d as history doubled, want it to stay flat", before, after)
+	}
+}
