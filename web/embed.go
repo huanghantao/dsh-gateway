@@ -18,7 +18,6 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/huanghantao/dsh-gateway/internal/httpcore"
@@ -108,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// blindly. Correctness after an upgrade matters more here than saving a
 	// conditional request.
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("ETag", etagFor(len(data)))
+	w.Header().Set("ETag", etagFor(data))
 	if match := r.Header.Get("If-None-Match"); match != "" && match == w.Header().Get("ETag") {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -170,12 +169,20 @@ func contentTypeFor(name string) string {
 	}
 }
 
-// etagFor derives a validator from the content itself.
+// etagFor derives a validator from the bytes themselves.
 //
-// Using the build's content hash rather than a modification time means a rebuilt
-// binary always invalidates cached assets, and an unchanged one never does.
-func etagFor(size int) string {
-	sum := sha256.Sum256([]byte(strconv.Itoa(size)))
+// The bytes, and not their length, because a length is not a version. The bundle
+// is unhashed and served `no-cache`, so this validator is the only thing that
+// tells a phone one build apart from the next — and an asset edited without
+// changing its byte count (a colour, a label, a rearranged conditional) kept the
+// validator it had, so the conditional request was answered 304 and the old file
+// survived the deploy. That presents as "the redeploy did nothing", which is an
+// afternoon of looking in the wrong place.
+//
+// A content hash rather than a modification time means a rebuilt binary always
+// invalidates cached assets, and an unchanged one never does.
+func etagFor(data []byte) string {
+	sum := sha256.Sum256(data)
 	return `"` + hex.EncodeToString(sum[:8]) + `"`
 }
 

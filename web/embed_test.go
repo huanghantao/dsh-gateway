@@ -157,6 +157,28 @@ func TestServesShellWithNonceAndAssets(t *testing.T) {
 	})
 }
 
+// TestETagFollowsTheContent pins the property that makes the validator worth
+// sending: two assets of the same length must not share one.
+//
+// The bundle is unhashed and served `no-cache`, so the ETag is the only thing
+// distinguishing one build from the next. While it was derived from the length,
+// an edit that did not change a byte count left it identical, the conditional
+// request was answered 304, and the old file survived the deploy — which reads
+// as "the redeploy did nothing", and sends whoever hit it looking at the tunnel,
+// the service worker and the browser cache before the handler.
+func TestETagFollowsTheContent(t *testing.T) {
+	first := etagFor([]byte("aaaa"))
+	if first == "" {
+		t.Fatal("etagFor produced an empty validator")
+	}
+	if first == etagFor([]byte("bbbb")) {
+		t.Error("two assets of equal length share an ETag; a rebuild that changes one without changing its size would never reach the browser")
+	}
+	if first != etagFor([]byte("aaaa")) {
+		t.Error("etagFor is not deterministic, so every request would be a miss")
+	}
+}
+
 // TestShellReferencesOnlyExistingAssets guards against a build that emits an
 // index referring to files the embed never captured, which would present as a
 // blank page with a console full of 404s.
