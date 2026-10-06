@@ -70,10 +70,18 @@ Four tiers, and the reason each exists is in the [README](README.md#development)
 - **Browser** — `make e2e` drives the real app in real Chrome against a running
   gateway. This one is not in CI; it needs a gateway you started yourself.
 
-There is **no frontend unit test suite**, and the README used to imply otherwise.
-`web/` has no `test` script and never has. The frontend's verification is `tsc`
-plus the browser tier, so a change to `web/src` that is not exercised by
-`make e2e` is a change nothing checks automatically. If you are touching the
+There is a frontend unit suite: `cd web && npm test`, which `make test` runs
+before the Go suite. It is plain `node --test` against the built `dist/`, so it
+needs no browser, no network and no framework — which is why `web/` still has
+exactly one devDependency. It covers the Markdown renderer on both sides of its
+split: the grammar in `test/markdown.test.js`, and the DOM it becomes in
+`test/markdown-render.test.js`, whose shim throws on `innerHTML` so that the
+renderer's central safety property fails a test rather than drifting out of a
+comment. `test/support/` holds that shim and is not collected; the glob in
+`package.json` is what decides which files are tests.
+
+Everything else in `web/src` is still exercised only by `make e2e`, so a change
+to a view is a change nothing checks automatically. If you are touching the
 session screen, run `make e2e`.
 
 ## Commit messages

@@ -94,6 +94,10 @@ web/
       settings.ts       screen 5
       activity.ts       screen 6, reached from the app bar's bell
       ui.ts             shared badge / bottom sheet / select
+  test/                 node --test against dist/; no browser, no framework
+    markdown.test.js    the grammar, asserted against the tree
+    markdown-render.test.js  the tree, asserted against the DOM
+    support/dom.js      the shim that throws on innerHTML; not collected as a test
   dist/                 build output, generated and gitignored; this is what Go embeds
 ```
 
@@ -103,10 +107,30 @@ web/
 cd web
 npm ci                 # typescript only, exactly the version package-lock.json pins
 npm run build          # prebuild copies assets, then tsc -> dist/
+npm test               # prebuild + build, then node --test (see below)
 npm run typecheck      # tsc --noEmit
 npm run watch          # tsc --watch (re-run `npm run assets` after CSS/HTML edits)
 npm run serve          # optional dev server on 127.0.0.1:8099
 ```
+
+### Tests
+
+`npm test` is `node --test`, with no runner and no DOM library. It reads `dist/`
+rather than `src/`, so it asserts what the browser is actually served, and its
+`pretest` hook builds first so the command is correct from a clean checkout.
+
+That the tests need no DOM environment is the reason `markdown/` is two files.
+`markdown/parse.ts` has no imports at all, so the whole grammar — headings,
+tables, nested lists, the emphasis flanking rules, the scheme allow-list, the
+nesting caps — is testable from plain Node. `markdown/render.ts` is then a
+translation with nothing to decide, and `test/support/dom.js` is a DOM small
+enough to fail on the things the renderer must not do: it implements only the
+surface the renderer is allowed to touch and **throws** from `innerHTML`,
+`outerHTML` and `insertAdjacentHTML`, and it records every tag created so a test
+can hold the renderer to a fixed set of elements. The safety argument in
+`render.ts` is executable rather than asserted.
+
+What this tier cannot see is layout and CSS. `make e2e` is the tier for that.
 
 `npm ci` rather than `npm install`: the lockfile is committed and resolves from
 `registry.npmjs.org`, so a build here uses the same tarball everywhere.

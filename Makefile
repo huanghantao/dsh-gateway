@@ -59,6 +59,10 @@ install: build ## Install the binary into GOBIN (or GOPATH/bin).
 
 .PHONY: test
 test: web ## Run the test suite.
+	@# The frontend tier runs from `web/` because it imports `dist/`, which the
+	@# `web` prerequisite has just built. It needs nothing else: no browser, no
+	@# network, no framework.
+	@cd $(WEB_DIR) && node --test --enable-source-maps "test/*.test.js"
 	@go test ./... -timeout 300s
 
 .PHONY: test-race

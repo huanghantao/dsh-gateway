@@ -56,6 +56,9 @@ jobs:
             exit 1
           fi
 
+      - name: Test the frontend
+        run: cd web && node --test --enable-source-maps "test/*.test.js"
+
       - name: Test
         run: go test -race ./... -timeout 600s
 

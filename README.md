@@ -293,15 +293,17 @@ The integration tier exists because the ACP field shapes this code depends on
 were themselves established by probing a live server. A documentation-only test
 would keep passing while the wire format drifted out from under it.
 
-The browser tier exists for the same reason applied to the other boundary. There
-is **no frontend unit test suite** — `tsc` proves the types line up and nothing
-proves the app works — and the Go tests call the API directly, so neither crosses
-where the two meet. Every bug found there so far lived exactly on that seam: a
-`/me` response whose field names did not match the device list; an event stream
-that stayed paused after pairing because the phone's first request had been a
-401; and a "copy session id" that copied nothing on any plain-HTTP origin, because
-an optional chain short-circuited the whole statement. All three were invisible to
-every other kind of test and obvious within a minute of driving a real browser.
+The browser tier exists for the same reason applied to the other boundary. The
+frontend's unit suite — `cd web && npm test`, folded into `make test` — covers
+the Markdown renderer on both sides of its split and nothing else in `web/src`:
+`tsc` proves the types line up, and the Go tests call the API directly, so
+neither crosses where the two meet. Every bug found there so far lived exactly on
+that seam: a `/me` response whose field names did not match the device list; an
+event stream that stayed paused after pairing because the phone's first request
+had been a 401; and a "copy session id" that copied nothing on any plain-HTTP
+origin, because an optional chain short-circuited the whole statement. All three
+were invisible to every other kind of test and obvious within a minute of driving
+a real browser.
 
 The browser tier is **not** part of CI: it needs a running gateway, which needs a
 `dsh` install and a model credential, and neither belongs in a workflow that runs

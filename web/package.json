@@ -11,7 +11,9 @@
     "watch": "tsc --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit",
     "assets": "node scripts/copy-public.mjs",
-    "serve": "node scripts/dev-server.mjs"
+    "serve": "node scripts/dev-server.mjs",
+    "pretest": "npm run build",
+    "test": "node --test --enable-source-maps \"test/*.test.js\""
   },
   "devDependencies": {
     "typescript": "6.0.3"
