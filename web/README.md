@@ -72,7 +72,9 @@ web/
                         which is prose because ACP has no subagent scope
     rows.ts             keyed row reconciler: mounts once, updates in place
     copybutton.ts       the copy control, shared by code blocks and tool cards
-    markdown.ts         small safe Markdown renderer (builds DOM nodes)
+    markdown/
+      parse.ts          a message -> a tree of blocks and spans; no imports, no DOM
+      render.ts         that tree -> DOM nodes, and the only place elements are built
     clipboard.ts        copy, with a fallback for origins without the API
     dom.ts              DOM builder, focus trap, keyboard/scroll helpers
     format.ts           pure presentation helpers
@@ -201,6 +203,34 @@ so instead.
 **Approvals** are mounted on `document.body`, outside `#app`, so they are
 answerable from every screen; while one is pending the rest of the shell is
 `inert`.
+
+### What the Markdown renderer draws
+
+`markdown/parse.ts` decides what a model's answer contains and `markdown/render.ts`
+draws it: ATX headings, fenced code, blockquotes, ordered/bullet/task lists, pipe
+tables, thematic breaks and paragraphs, plus inline code, bold, italic,
+strikethrough and links. That is the whole list, and it is a subset of CommonMark
+rather than a small parser for it — `#` needs a space, tables need a delimiter
+row, and a list item's continuation lines have to be indented.
+
+Three omissions are decisions rather than gaps:
+
+- **Raw HTML is text.** `<script>` reaches the screen as those eight characters,
+  because the renderer creates elements itself and never calls `innerHTML`. The
+  invariant is worth more than the markup: there is no sanitizer to get wrong
+  because there is nothing to sanitize.
+- **Images do not load.** A remote image is a beacon — the host learns the
+  reader's address every time the transcript is opened — and `PRIVACY.md`
+  undertakes to list every third party a deployment involves. `![alt](url)`
+  draws its alt text as a link instead, which is honest about what was there.
+- **Setext headings, indented code blocks, reference links, footnotes and lazy
+  continuation lines are literal text.** Each is rare in what a model writes,
+  and each costs a branch that has to stay right forever.
+
+Headings render one level below what was written: the conversation view already
+owns the page's `h1`, so a message's `#` opens at `h2`. Block nesting stops at
+`MAX_BLOCK_DEPTH` and inline nesting at `MAX_INLINE_DEPTH`, so a pathological
+`>>>>…` costs a bad render rather than the stack.
 
 ## Type strictness
 

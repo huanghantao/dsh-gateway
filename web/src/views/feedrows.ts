@@ -17,7 +17,7 @@ import { actorLabel, outcomeLabel } from "../activity.js";
 import { el } from "../dom.js";
 import type { FeedRow } from "../feed.js";
 import { formatTokens, relativeTime } from "../format.js";
-import { renderMarkdown } from "../markdown.js";
+import { renderMarkdown } from "../markdown/render.js";
 import type { RowHandle } from "../rows.js";
 import { formatElapsed, mountToolCard } from "../tools/card.js";
 import { toolCallView } from "../tools/present.js";
