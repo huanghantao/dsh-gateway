@@ -23,6 +23,12 @@ What follows from that, concretely:
   npm's `prebuild` hook copies `index.html`, `src/styles.css` and `public/*`
   into `dist/`. `dist/` is never committed: the Go server embeds it, so every
   path that compiles the gateway builds it first.
+- **`dist/` is emptied on every build.** `tsc` does not remove output whose
+  source was deleted or renamed, and `dist/` is what the binary embeds, so
+  without the `--clean` that `prebuild` passes, a module that moved would keep
+  its compiled copy — and the code the binary serves would quietly stop being
+  the code in `src/`. `npm run assets` skips the emptying on purpose: it exists
+  to refresh CSS and HTML under a running `tsc --watch`.
 - **No dead-code elimination.** Every module in `dist/` is fetched, so the
   modules are kept few and their imports acyclic. A stray `console.log` costs
   bytes; a stray module costs a round trip.
@@ -49,7 +55,8 @@ web/
   index.html            shell template, carries {{NONCE}} placeholders
   tsconfig.json         strict; see "Type strictness" below
   scripts/
-    copy-public.mjs     prebuild: index.html + styles.css + public/ -> dist/
+    copy-public.mjs     prebuild: empties dist/, then index.html + styles.css
+                        + public/ -> dist/; `npm run assets` skips the emptying
     dev-server.mjs      optional; serves dist/ with the real CSP and a nonce
   public/               copied verbatim into dist/
     manifest.webmanifest

@@ -6,7 +6,7 @@
   "description": "Mobile-first PWA frontend for dsh-gateway. No bundler, no runtime dependencies.",
   "type": "module",
   "scripts": {
-    "prebuild": "node scripts/copy-public.mjs",
+    "prebuild": "node scripts/copy-public.mjs --clean",
     "build": "tsc",
     "watch": "tsc --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit",
