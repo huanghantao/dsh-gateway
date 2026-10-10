@@ -75,8 +75,18 @@ app, on the settlement row for the child it belongs to.
 **What a lock screen never carries** is the model's answer. A settled turn's
 closing message is the body of a *chat* card (see below); the push payload has
 none of the room for it — the record is capped at 3000 bytes — and none of the
-privacy, being read by whoever picks the phone up. The notifier does not even
-hold the text unless a chat channel has asked for it.
+privacy, being read by whoever picks the phone up. The notification carries the
+text only when a chat channel has asked for it (`includeAnswer`), and the
+lock-screen payload has no field for it at all, so there is no configuration in
+which it reaches one.
+
+The message itself travels on the settlement that ends the turn, as part of the
+turn's own record, because that is what makes a card say what the turn concluded
+rather than what this process happened to watch go by. It is the same text the
+gateway already sends as the conversation row it belongs to, and every paired
+device is shown that; what the deployment decides here is whether a
+*notification* — a lock screen, or a chat service that stores what it is sent —
+is told it.
 
 Setting `push.includeSessionName: true` adds the session's title to the few
 notification *bodies* that would otherwise say it — the approval cards. It does

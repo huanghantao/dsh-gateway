@@ -29,8 +29,8 @@ import (
 // shows up here, counted in the summary of the turn that made it.
 //
 // This file builds those three. It is deliberately free of I/O and of the
-// notifier's policy: the strings are a pure function of the frames the gateway
-// already publishes, which is what makes them testable without a bus.
+// notifier's policy: the strings are a pure function of what a settlement
+// states, which is what makes them testable without a bus.
 
 // ActorKind is who a notification is about.
 //
@@ -67,137 +67,35 @@ func (a Actor) Label() string {
 // the older, actor-free shape rather than claiming to be the main agent.
 func (a Actor) isZero() bool { return a.Kind == "" }
 
-// Digest is what one turn accumulated while it ran.
+// workSummary renders what a turn did, as the middle line of a notification.
 //
-// It is counted from `session.tool` frames, which the gateway publishes for both
-// of its producers — the ACP bridge for a session this process drives, and the
-// log watcher for one the desktop drives — so the summary is available whichever
-// end is running the turn.
+//	12 tool calls · 3 files changed · 1 delegation · 1 failure
 //
-// Nothing here is a guess: a count is incremented when the corresponding frame
-// says the call settled. The one number that is deliberately absent is "how many
-// lines changed" — the tool arguments carry it, but only a parse the change
-// screen already does properly would extract it, and a second, weaker parse here
-// would eventually disagree with that screen.
-type Digest struct {
-	// Calls is every tool call that settled during the turn.
-	Calls int
-	// Failed is how many of those the harness reported as failed.
-	Failed int
-	// Delegations is how many tool calls were handed to a child agent. It is
-	// counted for the turn's own summary — "3 delegations" says how much of the
-	// work was handed out — and it is the only trace a delegation leaves in a
-	// notification, since the child's own finish is not announced.
-	Delegations int
-	// Edits is how many calls changed a file. Only the tools whose arguments
-	// record a whole-file mutation are counted, so `bash` running `sed -i` is
-	// not: see sessionlog.fileTools, whose list this mirrors on purpose.
-	Edits int
-}
-
-// Summary renders a digest as the middle line of a notification.
+// Empty when the turn did nothing countable, because "0 tool calls" is worse
+// than saying nothing: a turn that was pure conversation has no activity to
+// report, and the notification falls back to naming the session or the outcome.
 //
-// Empty when nothing happened, because "0 tool calls" is worse than saying
-// nothing: a turn that was pure conversation has no activity to report, and the
-// notification falls back to naming the session or the outcome.
-func (d Digest) Summary() string {
+// The counts are the settlement's own — see events.Work — and that is the point
+// of them living there rather than here. They used to be folded from the
+// `session.tool` frames this process happened to see, which made them a count of
+// the observer: a gateway that attached fourteen minutes into a thirty-eight
+// minute turn reported 105 calls for a turn that made 300, with a duration
+// measured from the same moment and the same error in it.
+func workSummary(work events.Work) string {
 	parts := make([]string, 0, 4)
-	if d.Calls > 0 {
-		parts = append(parts, plural(d.Calls, "tool call", "tool calls"))
+	if work.Calls > 0 {
+		parts = append(parts, plural(work.Calls, "tool call", "tool calls"))
 	}
-	if d.Edits > 0 {
-		parts = append(parts, plural(d.Edits, "file changed", "files changed"))
+	if work.Edits > 0 {
+		parts = append(parts, plural(work.Edits, "file changed", "files changed"))
 	}
-	if d.Delegations > 0 {
-		parts = append(parts, plural(d.Delegations, "delegation", "delegations"))
+	if work.Delegations > 0 {
+		parts = append(parts, plural(work.Delegations, "delegation", "delegations"))
 	}
-	if d.Failed > 0 {
-		parts = append(parts, plural(d.Failed, "failure", "failures"))
+	if work.Failed > 0 {
+		parts = append(parts, plural(work.Failed, "failure", "failures"))
 	}
 	return strings.Join(parts, " · ")
-}
-
-// add folds one settled call into the digest.
-func (d Digest) add(call callFact) Digest {
-	d.Calls++
-	if call.failed {
-		d.Failed++
-	}
-	if call.delegation {
-		d.Delegations++
-	}
-	if fileTool(call.tool) {
-		d.Edits++
-	}
-	return d
-}
-
-// fileTool names the tools whose arguments record a file mutation this build
-// counts. It mirrors sessionlog's own list; the two exist in different packages
-// because the projection and the notifier are separate readers of the same fact,
-// and a tool added to one without the other shows up as a test that disagrees.
-func fileTool(tool string) bool {
-	switch tool {
-	case "edit", "write":
-		return true
-	default:
-		return false
-	}
-}
-
-// delegationTool names the tools that run a child agent.
-//
-// `workflow` is included because it is the same event from the operator's point
-// of view — work handed to agents that are not the main one — even though it may
-// fan out to several children internally. The gateway sees one call, so it
-// counts one delegation; counting the fan-out would mean inventing children
-// whose names and results this process never receives.
-func delegationTool(tool string) bool {
-	switch tool {
-	case "subagent", "subagent_fork", "workflow":
-		return true
-	default:
-		return false
-	}
-}
-
-// callFact is the part of a settled tool frame the digest cares about.
-type callFact struct {
-	tool       string
-	failed     bool
-	delegation bool
-}
-
-// settledFact reads one settled call down to what the digest and the delegation
-// branch need, with the call's name already resolved by the caller.
-//
-// A call is failed when the harness said so, when the result carried a structured
-// error, or when a command exited non-zero. All three are read rather than only
-// the first: DSH reports a non-zero exit as a status, not an error, so a summary
-// built from `failed` alone would call a broken build a success.
-func settledFact(tool string, data events.ToolData) callFact {
-	failed := data.Status == events.ToolFailed || data.IsError
-	if code := data.ExitCode; code != nil && *code != 0 {
-		failed = true
-	}
-	return callFact{
-		tool:       tool,
-		failed:     failed,
-		delegation: delegationTool(tool),
-	}
-}
-
-// normaliseTool strips the decoration a producer may have added around a tool
-// name — "mcp__server__subagent", "bash: subagent" — so the vocabulary matches.
-func normaliseTool(tool string) string {
-	tool = strings.ToLower(strings.TrimSpace(tool))
-	if index := strings.LastIndex(tool, "__"); index >= 0 {
-		tool = tool[index+2:]
-	}
-	if index := strings.LastIndex(tool, ":"); index >= 0 {
-		tool = strings.TrimSpace(tool[index+1:])
-	}
-	return tool
 }
 
 // clip shortens a label to a rune budget without cutting a multi-byte character
@@ -214,22 +112,6 @@ func clip(text string, limit int) string {
 	}
 	runes := []rune(text)
 	return strings.TrimSpace(string(runes[:limit])) + "…"
-}
-
-// keepShape shortens text to a rune budget without touching its whitespace.
-//
-// It exists because clip was once used on a model's answer, and an answer is
-// markdown: its line breaks *are* its structure. Collapsing them turned a
-// heading, a table and a list into one paragraph of punctuation — the card
-// arrived reading "## 结论| 步骤 | 结果 ||---|---|| 构建 |…", which the platform
-// then rendered as exactly that, because markdown needs the breaks to tell a
-// table from a sentence. The two functions sit one line apart so that the next
-// person picks the right one.
-func keepShape(text string, limit int) string {
-	if utf8.RuneCountInString(text) <= limit {
-		return text
-	}
-	return strings.TrimSpace(string([]rune(text)[:limit])) + "…"
 }
 
 // plural renders a count with its noun, so "1 failure" is not "1 failures".

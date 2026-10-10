@@ -48,9 +48,9 @@ type Webhook struct {
 	// only one of those is a place a deployment may be willing to send model
 	// output: a group has other people in it, a chat service stores what it is
 	// sent, and the answer is the first text in a notification that the operator
-	// did not write and cannot predict. See NotifierOptions.KeepAnswers, which
-	// decides whether the text is collected at all — a channel cannot print what
-	// the notifier never kept.
+	// did not write and cannot predict. See NotifierOptions.CarryAnswers, which
+	// decides whether any notification is allowed to carry the text at all — a
+	// group cannot print what the deployment never let travel.
 	IncludeAnswer bool `yaml:"includeAnswer" json:"includeAnswer"`
 	// MaxAnswerChars bounds how much of that answer one card prints. Zero takes
 	// the built-in budget, DefaultAnswerChars.

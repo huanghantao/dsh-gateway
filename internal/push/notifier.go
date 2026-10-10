@@ -45,23 +45,26 @@ const DefaultTurnThreshold = 2 * time.Minute
 // it does: announcing the child tells the operator that something finished while
 // the thing they are waiting for has not. The turn's own notification is the one
 // that answers "is it done?", and it carries the delegations in its summary, so
-// nothing about the work is lost by waiting for it. See handleTool.
+// nothing about the work is lost by waiting for it.
 //
 // Everything else — a message arriving while the reader watches, a session
 // resync, a model catalog change — is silent by construction. The default case
 // is silence rather than an empty branch, because the safe direction for an
 // event type added later is not to wake anyone.
 //
-// What each notification *says* is the other half of the design, and it lives in
-// activity.go: an actor, an outcome and a summary, because "the agent finished"
-// is not enough to act on when the session was running three agents.
-//
-// The turn notification adds a fourth fact, and it is the one a reader actually
-// wants: the model's own closing message. A card that says which conversation
-// finished and how much work it took, but not what it concluded, sends the
-// reader into the app to answer the only question they had. The notifier keeps
-// that text as it streams past — see handleMessage — and hands it to the channels
-// that can carry it.
+// What a notification *says* is the other half of the design, and this type no
+// longer assembles it. A turn's own record — the message it ended on, and what
+// it did — is stated by whoever owned the turn, in the frame that settles it
+// (see events.TurnRecord). It used to be inferred here, from the messages and
+// tool frames this process happened to see while the turn was live, and that is
+// a description of the observer rather than of the turn: a gateway that attached
+// fourteen minutes into a thirty-eight-minute turn reported fourteen minutes and
+// the 105 calls it had watched, and — because DSH writes a turn's last message
+// and its `turn/end` milliseconds apart — the one message a reader wants arrived
+// one frame too late and was dropped, leaving the card to quote a narration from
+// seven minutes earlier or a bare "6 tool calls". Nothing here keeps a ledger of
+// a turn any more: the notifier decides whether a settlement is worth an
+// interruption, and renders what the settlement states.
 type Notifier struct {
 	bus     *events.Bus
 	service *Service
@@ -75,29 +78,29 @@ type Notifier struct {
 	// includeName decides whether a notification body may name the session. Off
 	// by default; see NotifierOptions.IncludeSessionName.
 	includeName bool
-	// keepAnswers decides whether the model's closing message is kept at all.
-	// It is true when at least one chat channel will render it, and when it is
-	// false the text is not even held: see NotifierOptions.KeepAnswers.
-	keepAnswers bool
+	// carryAnswers decides whether a notification carries the turn's closing
+	// message. The text is on the settlement either way — it is the turn's own
+	// record, and every client is shown the same message as a conversation row —
+	// so this is a decision about what a *notification* may say, not about what
+	// this process holds: see NotifierOptions.CarryAnswers.
+	carryAnswers bool
 	// describe names a session. Optional: without it the message still says
 	// which actor settled and what it did, and says which session by id.
 	describe func(ctx context.Context, sessionID string) string
 
 	mu sync.Mutex
-	// runs is the per-session ledger: what the current turn has accumulated,
-	// and whether it is still going.
-	runs map[string]*sessionRun
-	// runOrder bounds runs by first arrival, so a long-lived gateway cannot
-	// accumulate one ledger per session it has ever seen. It matters more now
-	// than it did: a ledger holds the turn's answer, which is kilobytes rather
-	// than a few counters.
-	runOrder []string
-	// calls are the tool calls still in flight, held across the turn they belong
-	// to so a delegation that outlives the registry's own correlation window can
-	// still be named. See rememberCall.
-	calls map[string]*openCall
-	// order bounds calls by arrival, so a long-lived gateway cannot accumulate
-	// them without limit.
+	// announced remembers the settlements already reported, so a settle frame
+	// that arrives twice — a replayed stream, a watcher restarted onto the same
+	// log — does not post the same card again. The card is a copy of the turn's
+	// own words now, and a duplicate is a second copy of an answer rather than a
+	// second "done" line.
+	//
+	// The key is the session and the turn together, because a turn id is only
+	// unique within its session: the log watcher mints `log-3` for every session
+	// it follows.
+	announced map[string]struct{}
+	// order bounds announced by first arrival, so a long-lived gateway cannot
+	// accumulate one key per turn it has ever seen.
 	order []string
 
 	// ready is closed once the notifier is subscribed. A caller may wait on it
@@ -107,59 +110,12 @@ type Notifier struct {
 	readyOnce sync.Once
 }
 
-// sessionRun is one session's current turn, as the notifier sees it.
-type sessionRun struct {
-	started time.Time
-	// live is false once the turn has settled. It stays in the map so a tool
-	// frame that arrives after the turn ended — the two producers do not
-	// interleave perfectly — is not mistaken for a new turn's work.
-	live   bool
-	digest Digest
-	// turnID is the turn this ledger belongs to, when the producer named one.
-	turnID string
-	// notified is the turn whose settlement has already been announced. The two
-	// producers can repeat a settle frame — a reconnect replays, a restart
-	// re-reads — and a repeated frame must not post a second card, because the
-	// card is now a copy of the answer rather than a one-line "done".
-	notified string
-	// answer is the model's last non-empty message in this turn: what the turn
-	// concluded, and the body of every notification about it. See handleMessage.
-	answer string
-	// model names the model that produced the answer, when a producer said so.
-	// Only the session log carries it, so it is empty for a turn this gateway
-	// drove over ACP.
-	model string
-}
-
-// maxTrackedRuns bounds the per-session ledger table. A ledger now holds a
-// turn's answer, so an unbounded table is not the few bytes per session it used
-// to be.
-const maxTrackedRuns = 512
-
-// maxStoredAnswer bounds the answer a ledger keeps, in runes.
+// maxAnnounced bounds the settlement ledger.
 //
-// It is not the card's budget — that belongs to the channel, which decides how
-// much of it to print (see Webhook.MaxAnswerChars). This is the ceiling on what
-// the notifier will hold in memory, and it is set well above every main agent
-// answer the gateway has seen, so a long report is truncated at the card rather
-// than before the card can choose its head and tail.
-const maxStoredAnswer = 20000
-
-// openCall is a tool call that has started and not settled.
-//
-// Only its name is kept, and it is kept because the closing frame may omit it:
-// DSH's completion update republishes neither the title nor the arguments, so
-// the opening frame is the only place a settled call can be identified from. The
-// digest needs that identification to count a delegation or a file change at
-// all.
-type openCall struct {
-	tool string
-}
-
-// maxTrackedCalls bounds the in-flight call registry. A session running more
-// tools than this at once is not a case worth growing memory for; the oldest are
-// dropped and their notifications simply name the tool instead of the task.
-const maxTrackedCalls = 256
+// It is a set of small keys rather than a ledger of turns — nothing but the fact
+// that a turn was announced — and it is bounded because a gateway that runs for
+// months would otherwise remember every turn it has ever reported.
+const maxAnnounced = 1024
 
 // NotifierOptions configures a Notifier.
 type NotifierOptions struct {
@@ -185,17 +141,19 @@ type NotifierOptions struct {
 	// notification that cannot say which conversation it is about is a
 	// notification the reader has to open to identify.
 	IncludeSessionName bool
-	// KeepAnswers keeps the model's closing message for each settled turn, so
-	// that a chat channel can print it. Set it when at least one webhook has
-	// answers enabled; when it is false the text is not collected at all, which
-	// is the honest default for a gateway whose only channel is a lock screen.
+	// CarryAnswers allows a notification to carry the settlement's closing
+	// message, so that a chat channel can print it.
 	//
-	// "Keep" rather than "include", because the two ends of this are different
-	// jobs: this one decides whether the text is held at all, and
-	// Webhook.IncludeAnswer decides whether a given group is shown it. A channel
-	// cannot print what the notifier never kept, which is why the second is
-	// gated by the first.
-	KeepAnswers bool
+	// Set it when at least one webhook has answers enabled. It is a gate on what
+	// leaves this process rather than on what it holds: the text arrives on the
+	// settlement frame either way, because it is part of the turn's own record
+	// and the same message is already on the client's stream as a conversation
+	// row. What this decides is whether a *notification* — a lock screen, a
+	// third-party chat service — is told it, and the lock-screen payload has no
+	// field for it at all (see encrypt.go). Webhook.IncludeAnswer decides which
+	// groups are shown it; a channel cannot print what the deployment never
+	// allowed to travel.
+	CarryAnswers bool
 }
 
 // NewNotifier builds a Notifier.
@@ -213,18 +171,17 @@ func NewNotifier(opts NotifierOptions) (*Notifier, error) {
 		opts.Now = time.Now
 	}
 	return &Notifier{
-		bus:         opts.Bus,
-		service:     opts.Service,
-		webhooks:    opts.Webhooks,
-		logger:      opts.Logger,
-		threshold:   opts.Threshold,
-		now:         opts.Now,
-		describe:    opts.Describe,
-		includeName: opts.IncludeSessionName,
-		keepAnswers: opts.KeepAnswers,
-		runs:        map[string]*sessionRun{},
-		calls:       map[string]*openCall{},
-		ready:       make(chan struct{}),
+		bus:          opts.Bus,
+		service:      opts.Service,
+		webhooks:     opts.Webhooks,
+		logger:       opts.Logger,
+		threshold:    opts.Threshold,
+		now:          opts.Now,
+		describe:     opts.Describe,
+		includeName:  opts.IncludeSessionName,
+		carryAnswers: opts.CarryAnswers,
+		announced:    map[string]struct{}{},
+		ready:        make(chan struct{}),
 	}, nil
 }
 
@@ -258,10 +215,6 @@ func (n *Notifier) handle(ctx context.Context, event events.Event) {
 	switch event.Type {
 	case events.TypeTurnState:
 		n.handleTurn(ctx, event)
-	case events.TypeSessionTool:
-		n.handleTool(event)
-	case events.TypeSessionMessage:
-		n.handleMessage(event)
 	case events.TypeApprovalRequested:
 		n.handleApproval(ctx, event)
 	case events.TypeApprovalResolved:
@@ -274,26 +227,28 @@ func (n *Notifier) handle(ctx context.Context, event events.Event) {
 		n.handleHarness(ctx, event)
 	default:
 		// The frame types this switch does not name are silent on purpose. See
-		// the policy in the type comment above.
+		// the policy in the type comment above. `session.message` and
+		// `session.tool` are among them now: a turn's own words and its work
+		// arrive on the settlement that states them, so nothing here watches a
+		// turn go by.
 	}
 }
 
 // turnStart decides when a turn began, for the purpose of "was it long enough
 // to interrupt someone about".
 //
-// The payload's own StartedAt is believed when it is present, and this is not a
-// detail: the notifier is a late observer by nature — it is a subscriber that
-// may attach at any point during a turn — so "the moment I first saw it running"
-// is only the start when the turn began after this process was listening. For a
-// turn already in flight it understates the wait, and worse, it makes the answer
-// depend on when a notification happened to be scheduled. A turn with two
-// minutes of work behind it would be suppressed as "too short to bother you
-// with" if its first running frame was processed a moment before the reader put
-// the phone down.
+// The payload's own StartedAt is believed when it is present, and that is the
+// whole answer now: the party that owned the turn states when it began, from the
+// scheduler's own bookkeeping or from the log's `turn/start`, so "the moment I
+// first saw it running" is not needed. It was, once — the notifier is a late
+// observer by nature, a subscriber that may attach at any point during a turn,
+// and a watcher that could not say when a turn began left it reporting the wait
+// it had witnessed as though it were the turn's: a thirty-eight-minute turn
+// announced as fourteen.
 //
-// The fallback is for the one producer that legitimately has no start time: the
-// session-log watcher cannot know when a turn it did not start began, which is
-// why the field is optional in the first place.
+// The fallback is for a producer that states no start at all: a zero duration is
+// then reported as silence rather than as "0s", which is the honest reading of a
+// fact nobody provided.
 func turnStart(state events.TurnState, now func() time.Time) time.Time {
 	if state.StartedAt != nil && !state.StartedAt.IsZero() {
 		return *state.StartedAt
@@ -318,100 +273,58 @@ func (n *Notifier) handleTurn(ctx context.Context, event events.Event) {
 		// the notification policy's worst case: an interruption that says work
 		// is finished when the work being waited for is not.
 		//
-		// The ledger is left untouched as well, not merely unannounced: it is
-		// keyed by session, so a child's frames could only ever be counted under
-		// the child, and its summary is never read.
+		// Its record is not read either, and that is not an omission: the record
+		// is quoted under the session it belongs to, and the session a reader is
+		// waiting on is the parent.
 		return
 	}
-
 	switch state.State {
-	case "running", "queued":
-		if state.State != "running" {
-			return
-		}
-		n.mu.Lock()
-		run, known := n.runs[event.SessionID]
-		switch {
-		case !known || !run.live:
-			// A new turn, or the first frame of a turn this process attached
-			// mid-flight. Either way the ledger starts empty: work counted under
-			// a previous turn must not be reported as this one's — and neither
-			// may its answer, which is the reason this reset is load-bearing now
-			// that a ledger holds text.
-			n.startRun(event.SessionID, state)
-		case run.started.IsZero():
-			run.started = turnStart(state, n.now)
-		}
-		n.mu.Unlock()
-
 	case "completed", "cancelled", "failed":
-		n.mu.Lock()
-		run, known := n.runs[event.SessionID]
-		var started time.Time
-		var digest Digest
-		var answer, model string
-		var repeated bool
-		if known {
-			started = run.started
-			digest = run.digest
-			answer, model = run.answer, run.model
-			// A settle frame can arrive twice — a replayed stream, a restarted
-			// watcher re-reading the same log — and the second one must not post
-			// the same card again. The first "done" line was harmless to repeat;
-			// a copy of the answer is not.
-			repeated = state.TurnID != "" && run.notified == state.TurnID
-			run.live = false
-			run.notified = state.TurnID
-		}
-		n.mu.Unlock()
-		if !known || repeated {
-			return
-		}
-		// A failure interrupts whatever its length. Everything else waits for the
-		// threshold, because a short successful answer is something the operator
-		// is still looking at — but a failure is the one outcome that leaves
-		// nothing behind to come back to, and a prompt sent from a phone is
-		// exactly the kind that is sent before walking away.
-		interrupt := state.State == "failed" || n.now().Sub(started) >= n.threshold
-		settled := settledTurn{
-			state:    state,
-			digest:   digest,
-			answer:   answer,
-			model:    model,
-			duration: n.now().Sub(started),
-		}
-		n.notify(ctx, n.turnMessage(ctx, event.SessionID, settled), turnUrgency(state.State), interrupt)
+		// The states worth announcing, and the only ones. A queued or running
+		// frame needs nothing kept here, because the settlement will state
+		// everything a consumer could want to know about the turn — see
+		// events.TurnRecord — so no ledger is opened when a turn starts.
+	default:
+		return
 	}
+	if !n.rememberAnnounced(event.SessionID, state.TurnID) {
+		// A settle frame can arrive twice — a replayed stream, a restarted
+		// watcher re-reading the same log — and the second one must not post the
+		// same card again: the card is now a copy of the turn's own words, so a
+		// duplicate is a second copy of an answer rather than a second "done".
+		return
+	}
+	duration := n.now().Sub(turnStart(state, n.now))
+	// A failure interrupts whatever its length. Everything else waits for the
+	// threshold, because a short successful answer is something the operator is
+	// still looking at — but a failure is the one outcome that leaves nothing
+	// behind to come back to, and a prompt sent from a phone is exactly the kind
+	// that is sent before walking away.
+	interrupt := state.State == "failed" || duration >= n.threshold
+	n.notify(ctx, n.turnMessage(ctx, event.SessionID, state, duration), turnUrgency(state.State), interrupt)
 }
 
-// startRun begins a fresh ledger for a session, evicting the oldest when the
-// table is full. The caller holds the lock.
-func (n *Notifier) startRun(sessionID string, state events.TurnState) {
-	if _, exists := n.runs[sessionID]; !exists {
-		n.runOrder = append(n.runOrder, sessionID)
+// rememberAnnounced records a settlement as reported, and answers whether it is
+// news. An empty turn id cannot be recognized twice — the producers that matter
+// all name one — so such a frame is always announced.
+func (n *Notifier) rememberAnnounced(sessionID, turnID string) bool {
+	if turnID == "" {
+		return true
 	}
-	n.runs[sessionID] = &sessionRun{
-		started: turnStart(state, n.now),
-		live:    true,
-		turnID:  state.TurnID,
+	key := sessionID + "\x00" + turnID
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, seen := n.announced[key]; seen {
+		return false
 	}
-	for len(n.runOrder) > maxTrackedRuns {
-		oldest := n.runOrder[0]
-		n.runOrder = n.runOrder[1:]
-		delete(n.runs, oldest)
+	n.announced[key] = struct{}{}
+	n.order = append(n.order, key)
+	for len(n.order) > maxAnnounced {
+		oldest := n.order[0]
+		n.order = n.order[1:]
+		delete(n.announced, oldest)
 	}
-}
-
-// settledTurn is one turn's ledger, read out at the moment it settled.
-type settledTurn struct {
-	state  events.TurnState
-	digest Digest
-	answer string
-	model  string
-	// duration is how long the turn ran. It is zero when the ledger had no
-	// start to subtract, and a zero duration is reported as silence rather than
-	// as "0s".
-	duration time.Duration
+	return true
 }
 
 // turnMessage states one settled turn: which conversation, what came of it, and
@@ -425,14 +338,14 @@ type settledTurn struct {
 // footnote the card draws under it, where a reader scans them rather than reads
 // them.
 //
-// The summary is the ledger this notifier kept from tool frames, and the answer
-// is the text it kept from message frames. Both are counted here rather than in
-// the channels, because the channels see one message and the notifier sees the
-// turn.
-func (n *Notifier) turnMessage(ctx context.Context, sessionID string, settled settledTurn) Message {
+// The summary and the answer are both quoted from the settlement's record — what
+// the turn did, by its owner's count, and the last thing it said. Neither is
+// derived here, which is the change this exists for: a notification used to be
+// assembled from the fragments this process happened to see, so it described the
+// observer. See events.TurnRecord.
+func (n *Notifier) turnMessage(ctx context.Context, sessionID string, state events.TurnState, duration time.Duration) Message {
 	actor := Actor{Kind: ActorMain}
-	state := settled.state
-	summary := settled.digest.Summary()
+	summary := workSummary(state.Record.Work)
 	title := n.headline(ctx, sessionID, state)
 	body := activityBody(summary, n.settledDetail(state))
 	if body == "" {
@@ -448,31 +361,41 @@ func (n *Notifier) turnMessage(ctx context.Context, sessionID string, settled se
 	return Message{
 		Title:      title,
 		Body:       body,
-		Answer:     n.keptAnswer(settled),
+		Answer:     n.closingText(state),
 		URL:        conversationURL(sessionID),
 		Tag:        "turn-" + sessionID,
 		SessionID:  sessionID,
 		Actor:      &actor,
 		Summary:    summary,
-		Model:      settled.model,
+		Model:      closingModel(state),
 		Outcome:    outcomeWord(state.State),
-		DurationMS: millis(settled.duration),
+		DurationMS: millis(duration),
 	}
 }
 
-// keptAnswer is the model's closing message, when this deployment keeps one and
-// the turn produced one.
+// closingText is what the turn said last, when this deployment sends that to a
+// notification.
 //
-// Empty for a cancelled turn's *result*, but not for its text: a stop is a
+// Empty for a cancelled turn's *result*, but not for its words: a stop is a
 // statement about the work, and what the agent had said before it stopped is
-// still the most useful thing the card can carry. It is empty when the turn
-// ended on a tool call with nothing said after it, which is where the summary
-// takes over.
-func (n *Notifier) keptAnswer(settled settledTurn) string {
-	if !n.keepAnswers {
+// still the most useful thing the card can carry. Empty when the turn ended on a
+// tool call with nothing said after it, which is where the summary takes over.
+func (n *Notifier) closingText(state events.TurnState) string {
+	if !n.carryAnswers || state.Record.Closing == nil {
 		return ""
 	}
-	return strings.TrimSpace(settled.answer)
+	return strings.TrimSpace(state.Record.Closing.Text)
+}
+
+// closingModel names the model that wrote the closing message, when a producer
+// knew. It travels with the words rather than beside them: a card that does not
+// carry an answer has no author to name, and the ACP stream does not report one
+// on a committed message, so this is empty for a turn this gateway drove.
+func closingModel(state events.TurnState) string {
+	if state.Record.Closing == nil {
+		return ""
+	}
+	return state.Record.Closing.Model
 }
 
 // headline names the thing this notification is about.
@@ -500,140 +423,6 @@ func (n *Notifier) settledDetail(state events.TurnState) string {
 		return ""
 	}
 	return strings.TrimSpace(state.Detail)
-}
-
-// handleTool folds a settled tool call into the turn's ledger.
-//
-// That is the whole job now: the ledger is what the turn's own notification
-// summarises, so a `subagent` call is counted as a delegation and reported when
-// the turn that made it ends, rather than announced on its own the moment the
-// child answers. A child's finish is not a finish of the operator's work — the
-// parent keeps going, often for many more minutes — and a lock screen that says
-// "done" over work that is still running is worse than staying quiet. See the
-// policy in the type comment above.
-func (n *Notifier) handleTool(event events.Event) {
-	data, ok := event.Data.(events.ToolData)
-	if !ok {
-		n.mismatch(event, "events.ToolData")
-		return
-	}
-	sessionID := event.SessionID
-	tool := normaliseTool(data.Tool)
-
-	if data.Phase == events.ToolStarted {
-		n.rememberCall(data.CallID, &openCall{tool: tool})
-		return
-	}
-
-	call, had := n.forgetCall(data.CallID)
-	// What the call *is* comes from the opening frame, because the closing one
-	// carries neither a title nor the arguments: DSH's completion update repeats
-	// them for nobody. The name is therefore resolved here, once, rather than in
-	// each consumer — the version of this that normalised the name twice
-	// classified a settled `subagent` call as an unknown tool named "".
-	name := data.Tool
-	if name == "" && had {
-		name = call.tool
-	}
-	fact := settledFact(name, data)
-
-	n.mu.Lock()
-	run, known := n.runs[sessionID]
-	if known && run.live {
-		run.digest = run.digest.add(fact)
-	}
-	n.mu.Unlock()
-}
-
-// handleMessage keeps the turn's own words.
-//
-// The model's closing message is what the reader actually wants from a
-// notification — "the task finished" without it is an invitation to go and look
-// — and it passes through this bus already: the ACP bridge publishes a committed
-// assistant message as it arrives, and the log watcher publishes the same row
-// for a session the desk is driving. So the notifier keeps the last non-empty
-// one per live turn and hands it to whatever channel can carry it, exactly the
-// way it already keeps a digest of the tool frames.
-//
-// Only the *last* one: a turn's intermediate text is the agent narrating itself
-// ("let me look at the parser first"), and the message the turn ends on is the
-// one that answers the prompt. Only a *live* turn's, because a message that
-// arrives after the turn settled belongs to a frame nobody is waiting on, and
-// the ledger it would land in has already been reported.
-//
-// The alternative was to read the answer back out of the session log when the
-// turn settles — the store is already consulted for a session's name (see
-// Describe) — and it loses on three counts. It costs a file read on the
-// notification path, it can only answer for a session that *has* a log (the log
-// watcher is not the only producer), and it lags: the log is written by whoever
-// owns the session, and the settle frame can arrive before the last row is on
-// disk. What the bus already carried is exact, free, and the same text the phone
-// was shown.
-func (n *Notifier) handleMessage(event events.Event) {
-	data, ok := event.Data.(events.MessageData)
-	if !ok {
-		n.mismatch(event, "events.MessageData")
-		return
-	}
-	if !n.keepAnswers || data.Role != "assistant" {
-		return
-	}
-	text := strings.TrimSpace(data.Text)
-	if text == "" {
-		// A step that only called tools commits an empty message. It is not a
-		// turn's answer, and treating it as one would erase the real answer a
-		// later step has not written yet.
-		return
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	run, known := n.runs[event.SessionID]
-	if !known || !run.live {
-		return
-	}
-	run.answer = keepShape(text, maxStoredAnswer)
-	if data.Model != "" {
-		run.model = data.Model
-	}
-}
-
-// rememberCall records a call that has started.
-func (n *Notifier) rememberCall(callID string, call *openCall) {
-	if callID == "" {
-		return
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if _, exists := n.calls[callID]; !exists {
-		n.order = append(n.order, callID)
-	}
-	n.calls[callID] = call
-	for len(n.order) > maxTrackedCalls {
-		oldest := n.order[0]
-		n.order = n.order[1:]
-		delete(n.calls, oldest)
-	}
-}
-
-// forgetCall removes a settled call and returns what was known about it.
-func (n *Notifier) forgetCall(callID string) (*openCall, bool) {
-	if callID == "" {
-		return nil, false
-	}
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	call, ok := n.calls[callID]
-	if !ok {
-		return nil, false
-	}
-	delete(n.calls, callID)
-	for index, id := range n.order {
-		if id == callID {
-			n.order = append(n.order[:index], n.order[index+1:]...)
-			break
-		}
-	}
-	return call, true
 }
 
 // turnUrgency asks for attention in proportion to what went wrong.

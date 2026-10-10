@@ -22,12 +22,20 @@ var limitsForTests = config.Limits{ToolInputBytes: 4096, ToolOutputBytes: 4096}
 // amounted to — because the failure it was rebuilt to prevent is a lock screen of
 // identical "The agent finished" lines that cannot be told apart or acted on.
 //
-// What it must never say is that a delegated child finished. A session can run
-// several agents, but only one of them is the thing the operator is waiting for:
-// the child settles inside the parent's turn, and the parent keeps working
-// afterwards, so announcing the child is an interruption that reports "done"
-// over work that is not. The delegation survives as a count in the parent's
-// summary, which is what these tests pin.
+// Where those facts come from has changed and is worth stating plainly, because
+// these tests are the boundary of it: a settlement states its own record (see
+// events.TurnRecord), so the notifier no longer folds tool frames to count, nor
+// keeps messages to quote. The counting is tested where it happens — the
+// projection's in internal/sessionlog, the update stream's in
+// internal/app/bridge, the arithmetic in internal/app/events — and what is left
+// here is what a notification renders and what it must never render.
+//
+// The one thing it must never say is that a delegated child finished. A session
+// can run several agents, but only one of them is the thing the operator is
+// waiting for: the child settles inside the parent's turn, and the parent keeps
+// working afterwards, so announcing the child is an interruption that reports
+// "done" over work that is not. The delegation survives as a count in the
+// parent's summary, which is what these tests pin.
 
 // oneNotification waits for the single message a test expects, and fails if more
 // than one ever arrived.
@@ -58,17 +66,29 @@ func TestADelegationIsCountedButNeverAnnounced(t *testing.T) {
 	bus, rec := notifierFor(t, push.NotifierOptions{Threshold: time.Nanosecond})
 
 	longStart := time.Now().Add(-10 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "running", StartedAt: &longStart})
 
-	toolStarted(bus, "session-1", "call_ok", "subagent", `{"description":"Research dependency versions","prompt":"Find the current versions of X, Y and Z."}`)
-	toolEnded(bus, "session-1", "call_ok", "", "X 1.2, Y 3.4, Z 5.6", false)
-	toolStarted(bus, "session-1", "call_bad", "subagent_fork", `{"description":"Audit the handlers"}`)
-	toolEnded(bus, "session-1", "call_bad", "", "tool call aborted: permission denied for /etc/hosts", true)
+	// Two delegated children, each a session of its own with a record of its
+	// own. `subagent` is the only thing that says what they are: a child's log,
+	// turns and record look exactly like a session a person opened.
+	for _, child := range []struct {
+		session string
+		closing string
+	}{
+		{"session-child-ok", "X 1.2, Y 3.4, Z 5.6"},
+		{"session-child-bad", "tool call aborted: permission denied for /etc/hosts"},
+	} {
+		bus.Publish(events.TypeTurnState, child.session, events.TurnState{
+			TurnID: "turn-child", State: "completed", StartedAt: &longStart,
+			Subagent: true, Record: said(child.closing, ""),
+		})
+	}
 
-	// The turn ends, which is the first thing worth a notification — and the
-	// ordering above makes it the proof that the two settlements were handled
-	// and produced nothing.
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "completed", StartedAt: &longStart})
+	// The turn that handed the work out settles, and its record is where the
+	// delegations and the failure are counted — by whoever owned it, not here.
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{
+		TurnID: "turn-1", State: "completed", StartedAt: &longStart,
+		Record: events.TurnRecord{Work: events.Work{Calls: 2, Delegations: 2, Failed: 1}},
+	})
 
 	message := oneNotification(t, rec, "a notification when the turn that delegated settles")
 	if message.Actor == nil || message.Actor.Kind != push.ActorMain {
@@ -88,10 +108,11 @@ func TestADelegationIsCountedButNeverAnnounced(t *testing.T) {
 	if !strings.Contains(message.Summary, "2 delegations") {
 		t.Errorf("summary = %q, want the countable phrase a client can render", message.Summary)
 	}
-	// And the children are still not named by what they were asked to do: that
-	// description was only ever carried by a notification about the child.
-	for _, field := range []string{message.Title, message.Body, message.Summary} {
-		for _, leaked := range []string{"Research dependency versions", "Audit the handlers", "permission denied"} {
+	// And the children are still not named by what they had to say: a child's
+	// record belongs to the child's session, and nothing may quote it under the
+	// parent's.
+	for _, field := range []string{message.Title, message.Body, message.Summary, message.Answer} {
+		for _, leaked := range []string{"X 1.2, Y 3.4, Z 5.6", "permission denied"} {
 			if strings.Contains(field, leaked) {
 				t.Errorf("message = %+v, must not carry the child's own text %q", message, leaked)
 			}
@@ -139,25 +160,17 @@ func toolExited(bus *events.Bus, sessionID, callID, tool string, code int) {
 	}, limitsForTests))
 }
 
-// TestTheTurnSummaryCountsWhatTheTurnActuallyDid is the "what did it do?" half
-// for a main-agent turn: the numbers come from the calls that settled during it,
-// and a failure among them is counted rather than hidden.
-func TestTheTurnSummaryCountsWhatTheTurnActuallyDid(t *testing.T) {
+// TestTheTurnSummaryRendersWhatTheTurnReported is the "what did it do?" half for
+// a main-agent turn: the numbers come from the settlement's own record, and a
+// failure among them is shown rather than hidden.
+func TestTheTurnSummaryRendersWhatTheTurnReported(t *testing.T) {
 	bus, rec := notifierFor(t, push.NotifierOptions{Threshold: time.Nanosecond})
 
 	longStart := time.Now().Add(-10 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "running", StartedAt: &longStart})
-
-	toolStarted(bus, "session-1", "call_1", "bash", `{"command":"go build ./..."}`)
-	toolExited(bus, "session-1", "call_1", "bash", 0)
-	// A command that exited non-zero is not an error to the harness — it is a
-	// status — so a summary built from `isError` alone would call this clean.
-	toolStarted(bus, "session-1", "call_2", "bash", `{"command":"go test ./..."}`)
-	toolExited(bus, "session-1", "call_2", "bash", 1)
-	toolStarted(bus, "session-1", "call_3", "write", `{"file_path":"notes.md"}`)
-	toolEnded(bus, "session-1", "call_3", "", "written", false)
-
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "completed", StartedAt: &longStart})
+	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{
+		TurnID: "turn-1", State: "completed", StartedAt: &longStart,
+		Record: events.TurnRecord{Work: events.Work{Calls: 3, Edits: 1, Failed: 1}},
+	})
 
 	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "a notification for the settled turn")
 	message := rec.received()[0]
@@ -168,27 +181,5 @@ func TestTheTurnSummaryCountsWhatTheTurnActuallyDid(t *testing.T) {
 	}
 	if !strings.Contains(message.Summary, "3 tool calls") {
 		t.Errorf("summary = %q, want the countable phrase a client can render", message.Summary)
-	}
-}
-
-// TestACallFromAPreviousTurnIsNotCounted guards the ledger's one failure mode:
-// a tool frame that arrives after its turn settled — the ACP bridge and the log
-// watcher do not interleave perfectly — must not be reported as the next turn's
-// work.
-func TestACallFromAPreviousTurnIsNotCounted(t *testing.T) {
-	bus, rec := notifierFor(t, push.NotifierOptions{Threshold: time.Nanosecond})
-
-	longStart := time.Now().Add(-10 * time.Minute)
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "running", StartedAt: &longStart})
-	bus.Publish(events.TypeTurnState, "session-1", events.TurnState{TurnID: "turn-1", State: "completed", StartedAt: &longStart})
-
-	// The straggler: a call that belongs to the turn that just ended.
-	toolStarted(bus, "session-1", "call_late", "bash", `{"command":"echo late"}`)
-	toolEnded(bus, "session-1", "call_late", "", "[exit code: 0]", false)
-
-	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "the settled turn is still reported")
-	first := rec.received()[0]
-	if strings.Contains(first.Body, "tool call") {
-		t.Errorf("body = %q, want no work counted: the turn had already settled", first.Body)
 	}
 }

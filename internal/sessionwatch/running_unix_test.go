@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 )
@@ -144,6 +145,124 @@ func TestTurnBoundariesBecomeState(t *testing.T) {
 	}
 	if !completed {
 		t.Error("turn/end did not report the turn as finished")
+	}
+}
+
+// TestASettledTurnCarriesItsOwnRecord is the whole point of a settlement carrying
+// a record.
+//
+// A follower reads a log it did not write, so what it watched arrive is not the
+// turn — it is the part of the turn that happened to overlap with this process
+// being alive. The projection has all of it, and the frame that settles the turn
+// states what it finds: the message the turn ended on, the calls it settled, and
+// the start the log itself records. A consumer needs nothing else, and nothing
+// about the notification then depends on publishing order or on when the gateway
+// came up. Both failures this replaces were reported from this deployment: a
+// 38-minute turn announced as "14m 28s · 105 tool calls" carrying a narration
+// from seven minutes before the end, and a redeploy turn announced as
+// "6 tool calls" with no answer at all.
+func TestASettledTurnCarriesItsOwnRecord(t *testing.T) {
+	f := newFixture(t, "session-record")
+	// A turn counts as running only while the session has a live writer.
+	release := f.holdLock(t)
+	defer release()
+	started := time.Now().Add(-38 * time.Minute).Truncate(time.Millisecond)
+	f.flush(map[string]any{
+		"type": "turn/start", "time": started.UnixMilli(), "data": map[string]any{"turn": 1},
+	})
+
+	watcher, _, sub := f.watcher(t, nil)
+	// First sight seeds the session and announces the turn already in flight.
+	watcher.Sweep(context.Background())
+	drain(sub)
+
+	f.flush(
+		// A narration the turn did not end on, and the tool calls it did run.
+		assistantMessage("a1", "Let me add an opt-in live test for the question path."),
+		map[string]any{"type": "tool/call", "data": map[string]any{"turn": 1, "step": 1, "callId": "call_edit", "name": "edit", "arguments": `{"file_path":"/tmp/a.go"}`}},
+		map[string]any{"type": "tool/result", "data": map[string]any{"turn": 1, "step": 1, "message": map[string]any{"role": "tool", "toolCallId": "call_edit", "id": "m-tool-1", "content": []map[string]any{{"type": "text", "text": "written"}}}}},
+		map[string]any{"type": "tool/call", "data": map[string]any{"turn": 1, "step": 2, "callId": "call_build", "name": "bash", "arguments": `{"command":"make build"}`}},
+		map[string]any{"type": "tool/result", "data": map[string]any{"turn": 1, "step": 2, "message": map[string]any{"role": "tool", "toolCallId": "call_build", "id": "m-tool-2", "content": []map[string]any{{"type": "text", "text": "boom\n[exit code: 1]"}}}}},
+		// The turn's last word, written milliseconds before its end boundary —
+		// which is exactly the row the old order lost.
+		assistantMessage("a2", "做完了，完整实现 + 真实环境验证。"),
+		map[string]any{"type": "turn/end", "data": map[string]any{"turn": 1, "reason": map[string]any{"kind": "completed"}}},
+	)
+	watcher.Sweep(context.Background())
+
+	var settled *events.TurnState
+	for _, e := range drain(sub) {
+		switch e.Type {
+		case events.TypeTurnState:
+			state, ok := e.Data.(events.TurnState)
+			if ok && state.State == "completed" {
+				settled = &state
+			}
+		default:
+			// The bus carries thirteen frame types; a test asserting on one of
+			// them is not an omission.
+		}
+	}
+	if settled == nil {
+		t.Fatal("the finished turn was not announced")
+	}
+	if settled.Record.Closing == nil || settled.Record.Closing.Text != "做完了，完整实现 + 真实环境验证。" {
+		t.Errorf("closing = %+v, want the message the turn ended on", settled.Record.Closing)
+	}
+	if want := (events.Work{Calls: 2, Failed: 1, Edits: 1}); settled.Record.Work != want {
+		t.Errorf("work = %+v, want %+v", settled.Record.Work, want)
+	}
+	// The start is the log's own, not the moment this process began watching:
+	// that difference is what a notification's duration and its "was it long
+	// enough to interrupt you about" are both read from.
+	if settled.StartedAt == nil || !settled.StartedAt.Equal(started) {
+		t.Errorf("startedAt = %v, want the log's turn/start %v", settled.StartedAt, started)
+	}
+}
+
+// TestTheTurnsRowsPrecedeItsSettlement keeps the one ordering that remains a
+// choice, and the reason it is now a choice rather than a requirement.
+//
+// A client that acts on "the turn is over" by drawing the finished turn should
+// not draw it before the turn's own last row has arrived. Nothing *depends* on
+// this — the settlement states that row's text itself, which is what the record
+// is for — but a reader seeing the turn close over a transcript that is missing
+// its last message is a worse picture than the same frames one sweep apart.
+func TestTheTurnsRowsPrecedeItsSettlement(t *testing.T) {
+	f := newFixture(t, "session-order")
+	release := f.holdLock(t)
+	defer release()
+	f.flush(map[string]any{"type": "turn/start", "data": map[string]any{"turn": 1}})
+
+	watcher, _, sub := f.watcher(t, nil)
+	watcher.Sweep(context.Background())
+	drain(sub)
+
+	f.flush(
+		assistantMessage("a1", "what the turn concluded"),
+		map[string]any{"type": "turn/end", "data": map[string]any{"turn": 1, "reason": map[string]any{"kind": "completed"}}},
+	)
+	watcher.Sweep(context.Background())
+
+	got := drain(sub)
+	message, settled := -1, -1
+	for i, e := range got {
+		switch e.Type {
+		case events.TypeSessionMessage:
+			message = i
+		case events.TypeTurnState:
+			if state, ok := e.Data.(events.TurnState); ok && state.State == "completed" {
+				settled = i
+			}
+		default:
+			// See above: the frame types this test does not assert on.
+		}
+	}
+	if message < 0 || settled < 0 {
+		t.Fatalf("the settle sweep published %v, want a message and a settled turn", typesOf(got))
+	}
+	if message > settled {
+		t.Errorf("the turn's rows were published after its settlement (order %v)", typesOf(got))
 	}
 }
 

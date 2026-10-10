@@ -58,6 +58,15 @@ type TurnState struct {
 	// turn, and it travels here because this frame is where the notification
 	// policy meets a session.
 	Subagent bool `json:"subagent,omitempty"`
+
+	// Record is what the turn's owner states about the turn itself, and is set
+	// on the settled states only — a running turn has no record yet.
+	//
+	// It is here rather than in a frame of its own because a settlement and its
+	// record are one fact: "this turn is over" without "and this is what it was"
+	// is exactly the signal a consumer has to reconstruct, and a reconstruction
+	// is what a publish order can silently ruin. See record.go.
+	Record TurnRecord `json:"record,omitzero"`
 }
 
 // HarnessState is the payload of TypeHarnessState.

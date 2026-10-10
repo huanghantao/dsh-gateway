@@ -317,7 +317,7 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 		// the present, and a phone that is already watching has no other way to
 		// learn that the gateway came up in the middle of someone's turn.
 		if running && !owned {
-			w.publishTurn(sessionID, true, meta)
+			w.publishTurn(sessionID, true, meta, events.TurnRecord{})
 		}
 		return
 	}
@@ -325,8 +325,27 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 	// The announcement follows the answer, not the file: a turn can start or
 	// finish without the log changing in the same tick as the lock — a process
 	// opening the session is one case, a process dying mid-turn is another.
+	//
+	// The two announcements straddle the rows below, and what that buys is the
+	// client's view rather than any consumer's correctness: a phone that acts on
+	// "the turn is over" by drawing the finished turn should not draw it before
+	// the turn's own last row has arrived. The settlement states that row's text
+	// itself (see events.TurnRecord), so a notification does not depend on this
+	// order at all — which is the point: the order used to be the only thing
+	// keeping the answer, and DSH writes a turn's last message and its
+	// `turn/end` milliseconds apart, so it lost.
+	//
+	// A *started* turn is in front of the rows for the mirror-image reason: they
+	// are that turn's own, and a client should not be shown rows belonging to a
+	// turn it has not been told about. The settlement is deferred rather than
+	// written after the loop so that the early returns below — an evicted
+	// projection, a log that shrank — still announce a turn that has finished.
 	if running != wasRunning && !owned {
-		w.publishTurn(sessionID, running, meta)
+		if running {
+			w.publishTurn(sessionID, true, meta, events.TurnRecord{})
+		} else {
+			defer w.publishTurn(sessionID, false, meta, sessionlog.LastTurn(items, meta.TurnStartedAt))
+		}
 	}
 
 	if previous.dropped {
@@ -375,17 +394,38 @@ func (w *Watcher) follow(ctx context.Context, log sessionlog.Log) {
 // the phone holds. A consumer deciding whether a finished turn is worth an
 // interruption needs to know which of the two it is looking at, and this is the
 // only frame that carries the answer.
-func (w *Watcher) publishTurn(sessionID string, running bool, meta sessionlog.Meta) {
+//
+// A settled turn also carries its own record — what it said last and what it did
+// — read off the projection this sweep already has in hand, and the time it
+// began, read off the log's own `turn/start`. Stating both here rather than
+// leaving a consumer to watch them go by is what makes the frame describe the
+// turn instead of this process: a gateway that came up fourteen minutes into a
+// thirty-eight-minute turn has all of it, and used to report the part it had
+// watched as though it were the whole.
+func (w *Watcher) publishTurn(sessionID string, running bool, meta sessionlog.Meta, record events.TurnRecord) {
 	state := "completed"
 	if running {
 		state = "running"
 	}
 	w.opts.Bus.Publish(events.TypeSessionState, sessionID, events.SessionBusy{Busy: running})
 	w.opts.Bus.Publish(events.TypeTurnState, sessionID, events.TurnState{
-		TurnID:   fmt.Sprintf("log-%d", meta.TurnCount+1),
-		State:    state,
-		Subagent: meta.Origin == sessionlog.OriginSubagent,
+		TurnID:    fmt.Sprintf("log-%d", meta.TurnCount+1),
+		State:     state,
+		StartedAt: turnStartedAt(meta),
+		Subagent:  meta.Origin == sessionlog.OriginSubagent,
+		Record:    record,
 	})
+}
+
+// turnStartedAt states when the turn began, when the log says. A log whose
+// boundaries carry no timestamp states nothing rather than inventing a start,
+// which is the same distinction the frame's own `startedAt` has always made.
+func turnStartedAt(meta sessionlog.Meta) *time.Time {
+	if meta.TurnStartedAt.IsZero() {
+		return nil
+	}
+	at := meta.TurnStartedAt.UTC()
+	return &at
 }
 
 // publishItem emits the event that carries one conversation row.

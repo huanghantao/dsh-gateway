@@ -437,6 +437,11 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		Timeout:       cfg.Session.PromptTimeout.Std(),
 		QueueDepth:    cfg.Session.PromptQueueDepth,
 		MaxConcurrent: cfg.Limits.MaxConcurrentTurns,
+		// The bridge is the gateway's transcript of what the ACP child
+		// committed, so it is where a driven turn's closing message and tool
+		// counts exist. The settlement states them rather than leaving the
+		// notifier to infer them from the frames it happens to see.
+		Records: updates,
 	})
 
 	leases := lease.New(lease.Options{
@@ -608,9 +613,12 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 			IncludeSessionName: cfg.Push.IncludeSessionName,
 			// The answer is what a chat channel is for, and the lock screen can
 			// never carry it — a Web Push payload is capped at 3000 bytes and is
-			// the least private surface this data reaches. So it is collected
-			// exactly when a chat channel says it will print it.
-			KeepAnswers: answersWanted,
+			// the least private surface this data reaches. So a notification
+			// carries the turn's closing message exactly when a chat channel
+			// says it will print it. The message itself travels on the
+			// settlement either way: it is part of the turn's own record, which
+			// is what the whole push path reads instead of reconstructing it.
+			CarryAnswers: answersWanted,
 			Describe: func(ctx context.Context, sessionID string) string {
 				if history == nil {
 					return ""

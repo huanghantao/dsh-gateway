@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/huanghantao/dsh-gateway/internal/errx"
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // This file projects "what did this session change" out of the session log.
@@ -36,14 +37,6 @@ const (
 	// arguments. It covers what `edit` and `write` did and nothing else.
 	SourceToolCalls = "tool-calls"
 )
-
-// fileTools are the tools whose arguments record a file mutation this build
-// understands. Anything else — a `bash` running `sed -i`, a `notebook_edit` with
-// its own argument shape — is not guessed at.
-var fileTools = map[string]bool{
-	"edit":  true,
-	"write": true,
-}
 
 // Bounds on one projection. A session that edited a thousand files should give
 // a phone something it can render, and say what it left out.
@@ -184,7 +177,7 @@ func FoldChanges(items []Item, workspace string) Changes {
 
 	// raw arguments, parsed once per item.
 	for _, item := range items {
-		if item.Role != RoleTool || !fileTools[item.Tool] {
+		if item.Role != RoleTool || !toolresult.FileTool(item.Tool) {
 			continue
 		}
 		change, ok := parseFileTool(item)

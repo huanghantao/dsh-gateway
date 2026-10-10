@@ -176,22 +176,27 @@ func TestOutcomeStatus(t *testing.T) {
 	}
 }
 
-// TestKeepShapeAndClipAreNotInterchangeable pins the difference the two
+// TestTheAnswerBudgetAndClipAreNotInterchangeable pins the difference the two
 // functions exist to express: one makes a label, the other preserves a document.
-func TestKeepShapeAndClipAreNotInterchangeable(t *testing.T) {
+//
+// It used to be keepShape against clip, and it is answerText against clip now:
+// keepShape was the notifier's own copy of the rule, applied to a model's answer
+// on its way into the ledger it kept. There is no ledger — the answer arrives on
+// the settlement — so the rule is applied where the text is actually printed,
+// which is this card's own budget.
+func TestTheAnswerBudgetAndClipAreNotInterchangeable(t *testing.T) {
 	const document = "## 结论\n\n- 一\n- 二"
 
-	if got := keepShape(document, 100); got != document {
-		t.Errorf("keepShape rewrote a document:\n got %q\nwant %q", got, document)
+	if got, cut := answerText(document, 100); got != document || cut {
+		t.Errorf("answerText rewrote a document it had room for:\n got %q (cut=%v)\nwant %q", got, cut, document)
 	}
 	if got := clip(document, 100); strings.Contains(got, "\n") {
 		t.Errorf("clip kept a line break, so it is no longer a label-maker: %q", got)
 	}
-	// Both still bound by runes, and neither cuts a multi-byte character.
+	// The label-maker still bounds by runes, and still does not cut a multi-byte
+	// character in half.
 	long := strings.Repeat("字", 50)
-	for name, got := range map[string]string{"clip": clip(long, 10), "keepShape": keepShape(long, 10)} {
-		if want := strings.Repeat("字", 10) + "…"; got != want {
-			t.Errorf("%s(%d runes, limit 10) = %q, want %q", name, 50, got, want)
-		}
+	if got, want := clip(long, 10), strings.Repeat("字", 10)+"…"; got != want {
+		t.Errorf("clip(%d runes, limit 10) = %q, want %q", 50, got, want)
 	}
 }

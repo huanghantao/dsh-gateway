@@ -346,7 +346,7 @@ func longTurnMessage(t *testing.T, includeName, describe bool, state string) (st
 		}
 	})
 	f.start("session-1", "turn-1")
-	f.settle("session-1", "turn-1", state)
+	f.settle("session-1", "turn-1", state, events.TurnRecord{})
 
 	waitFor(t, func() bool { return len(f.messages()) >= 1 }, "a notification for a long turn")
 	message := f.messages()[0]
@@ -463,7 +463,7 @@ func TestALongTurnIsNotifiedEvenIfTheObserverArrivedLate(t *testing.T) {
 
 // turnFixture is a real notifier wired to both kinds of channel — a browser that
 // decrypts what it is sent, and a chat bot that records the cards it is posted —
-// so a test can publish the frames a turn is made of and read back what each
+// so a test can publish what a producer would publish and read back what each
 // channel would show. The two differ on purpose: the answer is a chat card's
 // body and never a lock screen's.
 type turnFixture struct {
@@ -532,17 +532,29 @@ func (f *turnFixture) start(sessionID, turnID string) {
 	})
 }
 
-// say publishes one committed assistant message.
+// say publishes one committed assistant message: a conversation row, which is
+// what a client sees. It is not how a notification learns what a turn said — see
+// settle — and the tests below use it to check exactly that.
 func (f *turnFixture) say(sessionID, text, model string) {
 	f.bus.Publish(events.TypeSessionMessage, sessionID, events.MessageData{
 		Role: "assistant", Text: text, Model: model,
 	})
 }
 
-func (f *turnFixture) settle(sessionID, turnID, state string) {
+// settle publishes a settlement, which is the turn's own statement about itself:
+// the outcome *and* the record of what it was. A producer states the record —
+// the scheduler from the bridge, the watcher from the session log — so a test
+// states it here rather than feeding the notifier frames and hoping it infers
+// the same thing.
+func (f *turnFixture) settle(sessionID, turnID, state string, record events.TurnRecord) {
 	f.bus.Publish(events.TypeTurnState, sessionID, events.TurnState{
-		TurnID: turnID, State: state, StartedAt: &f.started,
+		TurnID: turnID, State: state, StartedAt: &f.started, Record: record,
 	})
+}
+
+// said is the record a producer states for a turn that ended on these words.
+func said(text, model string) events.TurnRecord {
+	return events.TurnRecord{Closing: &events.Closing{Text: text, Model: model}}
 }
 
 func (f *turnFixture) messages() []push.Message { return f.rec.received() }
@@ -564,23 +576,15 @@ func (f *turnFixture) cards() []string {
 // concluded, or it sends the reader into the app to answer the only question
 // they had.
 func TestTheSettledTurnCarriesTheModelsAnswer(t *testing.T) {
-	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.KeepAnswers = true })
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
 
 	f.start("session-1", "turn-1")
-	// An intermediate narration, a step that only called tools, and then the
-	// message the turn actually ended on. Only the last one is the answer.
-	f.say("session-1", "Let me look at the parser first.", "")
-	f.say("session-1", "", "")
-	f.say("session-1", "已提交并推送。", "deepseek/deepseek-v4.1-flash")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", said("已提交并推送。", "deepseek/deepseek-v4.1-flash"))
 
 	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card in the chat")
 	card := f.cards()[0]
 	if !strings.Contains(card, "已提交并推送。") {
 		t.Errorf("the card does not carry the answer: %s", card)
-	}
-	if strings.Contains(card, "Let me look at the parser first.") {
-		t.Errorf("the card carries the narration instead of the answer: %s", card)
 	}
 	// The turn ran for five minutes, and the card says so in its own line.
 	if !strings.Contains(card, "5m") {
@@ -593,20 +597,94 @@ func TestTheSettledTurnCarriesTheModelsAnswer(t *testing.T) {
 	}
 }
 
-// TestAnEmptyMessageAfterTheAnswerKeepsIt: a turn can commit a step that said
-// nothing after the message that said everything — another tool call, a final
-// empty step. Reading that as "the turn's last words" would erase the answer.
-func TestAnEmptyMessageAfterTheAnswerKeepsIt(t *testing.T) {
-	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.KeepAnswers = true })
+// TestASettlementNeedsNothingElse is the regression test for the bug this design
+// exists to prevent.
+//
+// A notification used to be reconstructed. The notifier kept the last assistant
+// message it saw while a turn was live, so what a card said depended on publish
+// order — and DSH writes a turn's last message and its `turn/end` boundary
+// milliseconds apart, which means the settlement of a 38-minute turn arrived
+// with the narration from seven minutes earlier still in the ledger while the
+// report the operator was waiting for was dropped one frame later. A second turn
+// whose visible life was tool calls produced a card whose entire body was
+// "6 tool calls".
+//
+// The record travels with the settlement now, so this test publishes one frame
+// and nothing else: no running frame, no message frames, no tool frames. What
+// the card says is what the turn's owner stated, and that is the whole point —
+// no consumer has to have watched anything.
+func TestASettlementNeedsNothingElse(t *testing.T) {
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
 
-	f.start("session-1", "turn-1")
-	f.say("session-1", "The build is green.", "")
-	f.say("session-1", "   \n  ", "")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", events.TurnRecord{
+		Closing: &events.Closing{Text: "做完了，完整实现 + 真实环境验证。", Model: "deepseek-flash"},
+		Work:    events.Work{Calls: 105, Edits: 3, Failed: 1},
+	})
 
 	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card in the chat")
-	if card := f.cards()[0]; !strings.Contains(card, "The build is green.") {
-		t.Errorf("the answer was erased by an empty step: %s", card)
+	card := f.cards()[0]
+	for _, want := range []string{
+		"做完了，完整实现 + 真实环境验证。",
+		"deepseek-flash",
+		"105 tool calls",
+		"3 files changed",
+		"1 failure",
+		"5m",
+	} {
+		if !strings.Contains(card, want) {
+			t.Errorf("the card is missing %q: %s", want, card)
+		}
+	}
+}
+
+// TestFramesAfterASettlementChangeNothing is the other half of it: the notifier
+// no longer watches a turn go by, so a message or tool frame that arrives after
+// the settlement — the two producers do not interleave perfectly, and a replay
+// can put anything anywhere — cannot rewrite a card that has been posted, nor
+// start a second one.
+//
+// The second settlement is the barrier that makes the assertion deterministic:
+// frames are handled in order by one goroutine, so once the second card exists,
+// every frame published above it has already been dealt with.
+func TestFramesAfterASettlementChangeNothing(t *testing.T) {
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
+
+	f.settle("session-1", "turn-1", "completed", said("The answer.", ""))
+	f.say("session-1", "A message that arrived after the turn ended.", "")
+	toolStarted(f.bus, "session-1", "call_late", "bash", `{"command":"echo late"}`)
+	toolExited(f.bus, "session-1", "call_late", "bash", 1)
+	toolStarted(f.bus, "session-1", "call_late_2", "subagent", `{"prompt":"audit"}`)
+	toolEnded(f.bus, "session-1", "call_late_2", "", "aborted", true)
+	f.settle("session-2", "turn-2", "completed", said("Second.", ""))
+
+	waitFor(t, func() bool { return len(f.cards()) >= 2 }, "a card for each settlement")
+	if got := len(f.cards()); got != 2 {
+		t.Fatalf("cards = %d, want 2: a frame after a settlement produced one", got)
+	}
+	first := f.cards()[0]
+	if !strings.Contains(first, "The answer.") {
+		t.Errorf("the settled card lost its answer: %s", first)
+	}
+	if strings.Contains(first, "arrived after the turn ended") {
+		t.Errorf("a later message rewrote the card: %s", first)
+	}
+	if strings.Contains(first, "tool call") {
+		t.Errorf("a later tool frame was counted into the card: %s", first)
+	}
+}
+
+// TestATurnThatEndedOnAToolCallSaysWhatItDid: a record can carry work and no
+// closing message, which is what a turn that ended on a call looks like. The card
+// then says what the turn did rather than leaving a hole where the answer goes.
+func TestATurnThatEndedOnAToolCallSaysWhatItDid(t *testing.T) {
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
+
+	f.settle("session-1", "turn-1", "completed", events.TurnRecord{Work: events.Work{Calls: 6}})
+
+	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card for a turn with no closing message")
+	card := f.cards()[0]
+	if !strings.Contains(card, "6 tool calls") {
+		t.Errorf("the card does not say what the turn did: %s", card)
 	}
 }
 
@@ -615,12 +693,11 @@ func TestAnEmptyMessageAfterTheAnswerKeepsIt(t *testing.T) {
 // record, so an answer left in the message does not merely leak, it breaks
 // delivery of the notification that matters.
 func TestTheAnswerNeverReachesALockScreen(t *testing.T) {
-	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.KeepAnswers = true })
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
 
 	huge := strings.Repeat("一字一句皆辛苦。", 900) // ~6,300 characters, ~19KB of UTF-8
 	f.start("session-1", "turn-1")
-	f.say("session-1", huge, "")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", said(huge, ""))
 
 	waitFor(t, func() bool { return len(f.messages()) >= 1 && len(f.cards()) >= 1 },
 		"a notification that carries no answer at all")
@@ -632,23 +709,24 @@ func TestTheAnswerNeverReachesALockScreen(t *testing.T) {
 	}
 }
 
-// TestAnswersAreNotCollectedWhenNoChannelPrintsThem: the text is kilobytes per
-// session, so a deployment whose notifications go to a lock screen must not pay
-// for holding it.
-func TestAnswersAreNotCollectedWhenNoChannelPrintsThem(t *testing.T) {
+// TestAnswersAreNotCarriedWhenNoChannelPrintsThem: the text is model output on
+// its way to a third party, so a deployment whose notifications all say they will
+// not print it must not be handed it — the gate is the deployment's, and it is
+// applied where the notification is composed rather than where the turn is
+// recorded.
+func TestAnswersAreNotCarriedWhenNoChannelPrintsThem(t *testing.T) {
 	f := newTurnFixture(t, func(o *push.NotifierOptions) {
-		o.KeepAnswers = false
+		o.CarryAnswers = false
 		o.Webhooks[0].IncludeAnswer = false
 	})
 
 	f.start("session-1", "turn-1")
-	f.say("session-1", "This text has nowhere to go.", "")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", said("This text has nowhere to go.", ""))
 
 	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card in the chat")
 	card := f.cards()[0]
 	if strings.Contains(card, "This text has nowhere to go.") {
-		t.Errorf("an answer was collected and sent with every channel opted out: %s", card)
+		t.Errorf("an answer was carried with every channel opted out: %s", card)
 	}
 	// The card still says something: the line it said before this existed.
 	if !strings.Contains(card, "Open the session for the result.") {
@@ -662,14 +740,13 @@ func TestAnswersAreNotCollectedWhenNoChannelPrintsThem(t *testing.T) {
 // the notifier handles frames in order, so once its card exists, the duplicate
 // has been handled.
 func TestARepeatedSettlementIsAnnouncedOnce(t *testing.T) {
-	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.KeepAnswers = true })
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
 
 	f.start("session-1", "turn-1")
-	f.say("session-1", "Done.", "")
-	f.settle("session-1", "turn-1", "completed")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", said("Done.", ""))
+	f.settle("session-1", "turn-1", "completed", said("Done.", ""))
 	f.start("session-2", "turn-2")
-	f.settle("session-2", "turn-2", "completed")
+	f.settle("session-2", "turn-2", "completed", said("Second.", ""))
 
 	waitFor(t, func() bool { return len(f.messages()) >= 2 }, "both sessions announced")
 	first := 0
@@ -700,25 +777,25 @@ func waitFor(t *testing.T, condition func() bool, what string) {
 //
 // The answer is markdown, and markdown's block structure *is* its line breaks: a
 // heading, a table and a list are only those things because a newline separates
-// them from what came before. The notifier stored the answer through `clip`,
-// which collapses whitespace to make a one-line label — correct for a title, and
-// fatal here. Every card read "## 结论| 步骤 | 结果 ||---|---|| 构建 |…" and was
+// them from what came before. The notifier used to store the answer through
+// `clip`, which collapses whitespace to make a one-line label — correct for a
+// title, and fatal here. Every card read "## 结论| 步骤 | 结果 ||---|---|| 构建 |…" and was
 // rendered as exactly that.
 //
-// The assertion is on the delivered card, not on the ledger: the bug was
+// The assertion is on the delivered card, not on the record: the bug was
 // invisible until the text had been all the way through the renderer.
 func TestTheAnswerReachesTheCardWithoutLosingItsShape(t *testing.T) {
 	const answer = "## 结论\n\n| 步骤 | 结果 |\n|---|---|\n| 构建 | 通过 |\n\n- 第一项\n- 第二项\n\n```go\ngo test ./...\n```"
 
-	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.KeepAnswers = true })
+	f := newTurnFixture(t, func(o *push.NotifierOptions) { o.CarryAnswers = true })
 	f.start("session-1", "turn-1")
-	f.say("session-1", answer, "")
-	f.settle("session-1", "turn-1", "completed")
+	f.settle("session-1", "turn-1", "completed", said(answer, ""))
 
-	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card in the chat")
-	card := parseCard(t, f.chat.all()[0])
-	body := strings.Join(card.bodies, "")
-	if body != answer {
-		t.Errorf("the answer lost its shape on the way to the card:\n got %q\nwant %q", body, answer)
+	waitFor(t, func() bool { return len(f.cards()) >= 1 }, "a card carrying a markdown answer")
+	card := f.cards()[0]
+	for _, line := range []string{"## 结论", "| 步骤 | 结果 |", "|---|---|", "- 第一项", "```go"} {
+		if !strings.Contains(card, line) {
+			t.Errorf("the card lost the line %q:\n%s", line, card)
+		}
 	}
 }

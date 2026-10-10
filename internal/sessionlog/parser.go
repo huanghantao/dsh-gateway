@@ -152,8 +152,13 @@ func (p *parser) feed(line []byte) {
 		p.feedToolResult(line, env)
 	case "turn/start":
 		// Recorded so a follower can tell a session that is working right now
-		// from one that is merely recent.
+		// from one that is merely recent — and, since the event carries its own
+		// timestamp, so that it can say *when* the turn began. Without that a
+		// follower could only answer "since when have I been watching", which is
+		// a different question: it reported a 38-minute turn as 14 minutes, with
+		// the 105 tool calls it happened to see as though the turn had made 105.
 		p.meta.TurnRunning = true
+		p.meta.TurnStartedAt = fromMillis(env.Time)
 	case "turn/end":
 		p.meta.TurnRunning = false
 		p.meta.TurnCount++

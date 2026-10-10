@@ -7,11 +7,13 @@
 package bridge
 
 import (
+	"strings"
 	"sync"
 
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/config"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
+	"github.com/huanghantao/dsh-gateway/internal/toolresult"
 )
 
 // Bridge implements harness.UpdateSink and harness.StateSink.
@@ -41,6 +43,17 @@ type Bridge struct {
 	// oldest to drop without scanning the map.
 	order []string
 
+	// turns is what each session's open turn has accumulated: the words it would
+	// be quoted by, and the work it did. The scheduler takes it when it settles
+	// the turn (see TakeTurn), which is what makes a notification's content the
+	// turn's own record rather than a consumer's impression of a stream — the
+	// bridge is where those two facts exist, and the settlement is when they are
+	// complete.
+	turns map[string]*events.TurnRecord
+	// turnOrder is the session ids in the order their records were first seen,
+	// so the cap below has an oldest to drop.
+	turnOrder []string
+
 	// limits is the deployment's byte budget for a tool's arguments and result.
 	// It is held here so that one payload shape is bounded in one place.
 	limits config.Limits
@@ -54,6 +67,18 @@ type Bridge struct {
 // notifier's, for the same correlation and the same reason.
 const maxOpenCalls = 256
 
+// maxTurnRecords bounds the open-turn table.
+//
+// A record is handed over when its turn settles, so entries live for one turn —
+// but a settle is not guaranteed, and a record is not small: it holds the turn's
+// closing message, which for a report is kilobytes. Child sessions stream
+// through this table too and none of them is ever taken — a delegation's turn is
+// not the gateway's to settle — so the bound has to clear the largest fan-out
+// this gateway has seen, which is why it matches the per-session ledger it
+// replaces. Eviction is by least recent activity rather than by arrival: see
+// touchTurnLocked.
+const maxTurnRecords = 512
+
 // opened is what a call was announced with.
 type opened struct {
 	name  string
@@ -62,7 +87,12 @@ type opened struct {
 
 // New builds a Bridge.
 func New(bus *events.Bus, limits config.Limits) *Bridge {
-	return &Bridge{bus: bus, open: map[string]opened{}, limits: limits}
+	return &Bridge{
+		bus:    bus,
+		open:   map[string]opened{},
+		turns:  map[string]*events.TurnRecord{},
+		limits: limits,
+	}
 }
 
 // Publish implements harness.UpdateSink.
@@ -74,6 +104,7 @@ func (b *Bridge) Publish(u harness.Update) {
 			Role: "assistant",
 			Text: u.Text,
 		})
+		b.rememberClosing(u)
 
 	case harness.UpdateThought:
 		b.bus.Publish(events.TypeSessionThought, u.SessionID, map[string]any{
@@ -149,6 +180,104 @@ func (b *Bridge) publishTool(u harness.Update) {
 		IsError: tool.IsError,
 		Facts:   tool.Result.Facts(),
 	}, b.limits))
+
+	if phase == events.ToolEnded {
+		// The turn's own count of what it did. The name is the one resolved
+		// above, because the closing update carries neither a title nor the
+		// arguments — see `open` — and a call counted under an empty name would
+		// be a call that is not a delegation and not an edit.
+		b.countCall(u.SessionID, name, status == events.ToolFailed || toolresult.Failed(tool.IsError, tool.Result.Facts()))
+	}
+}
+
+// rememberClosing keeps the last thing the turn said.
+//
+// Only the last, and only when it said something: a step that merely called
+// tools commits a message with no text, and treating that as the turn's
+// sign-off would erase an answer an earlier step had already written.
+func (b *Bridge) rememberClosing(u harness.Update) {
+	if strings.TrimSpace(u.Text) == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.recordLocked(u.SessionID).Closing = &events.Closing{Text: u.Text, Model: u.Model}
+}
+
+// countCall folds one settled call into the session's open turn.
+func (b *Bridge) countCall(sessionID, tool string, failed bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.recordLocked(sessionID).Work.Count(tool, failed)
+}
+
+// TakeTurn hands over what a session's open turn accumulated, and leaves nothing
+// behind for the next one to inherit.
+//
+// The scheduler calls it as it settles a turn it drove, which is the one moment
+// the record is complete: the prompt has answered, so the harness has committed
+// everything the turn will ever commit. Reading is a handover rather than a
+// copy because the two ends mean different things by "the turn's record" — this
+// side means the turn in flight, the settlement means the turn that just ended —
+// and a record left behind would be quoted as the closing words of whatever the
+// session did next.
+func (b *Bridge) TakeTurn(sessionID string) events.TurnRecord {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	record, ok := b.turns[sessionID]
+	if !ok {
+		return events.TurnRecord{}
+	}
+	delete(b.turns, sessionID)
+	for index, id := range b.turnOrder {
+		if id == sessionID {
+			b.turnOrder = append(b.turnOrder[:index], b.turnOrder[index+1:]...)
+			break
+		}
+	}
+	return *record
+}
+
+// recordLocked returns the session's open-turn record, creating it within the
+// cap. The caller holds the lock.
+func (b *Bridge) recordLocked(sessionID string) *events.TurnRecord {
+	if record, ok := b.turns[sessionID]; ok {
+		b.touchTurnLocked(sessionID)
+		return record
+	}
+	record := &events.TurnRecord{}
+	b.turns[sessionID] = record
+	b.turnOrder = append(b.turnOrder, sessionID)
+	for len(b.turnOrder) > maxTurnRecords {
+		oldest := b.turnOrder[0]
+		b.turnOrder = b.turnOrder[1:]
+		delete(b.turns, oldest)
+	}
+	return record
+}
+
+// touchTurnLocked moves a session to the newest end of the eviction order.
+//
+// The order is by activity rather than by arrival, because the sessions in this
+// table are not all the same kind. A turn the gateway drives is written to
+// continuously — a call settles every few seconds — while a delegated child can
+// finish and then say nothing for the rest of its parent's turn. Evicting on
+// arrival would let a workflow that fans out to enough children drop the record
+// of the one turn whose settlement is going to read it; evicting on activity
+// drops the children that have stopped talking, which is what they are.
+func (b *Bridge) touchTurnLocked(sessionID string) {
+	for index, id := range b.turnOrder {
+		if id != sessionID {
+			continue
+		}
+		if index == len(b.turnOrder)-1 {
+			return
+		}
+		b.turnOrder = append(b.turnOrder[:index], b.turnOrder[index+1:]...)
+		b.turnOrder = append(b.turnOrder, sessionID)
+		return
+	}
 }
 
 // toolStatusOf maps a harness lifecycle word onto the wire vocabulary.

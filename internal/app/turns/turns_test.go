@@ -648,3 +648,78 @@ func TestQueuedPromptIsEchoedToo(t *testing.T) {
 		}
 	}
 }
+
+// recordSource is a stand-in for the bridge: whatever a test says a session's
+// turn accumulated.
+type recordSource struct {
+	records map[string]events.TurnRecord
+	taken   []string
+}
+
+func (r *recordSource) TakeTurn(sessionID string) events.TurnRecord {
+	r.taken = append(r.taken, sessionID)
+	record := r.records[sessionID]
+	delete(r.records, sessionID)
+	return record
+}
+
+// TestSettlementStatesTheTurnsRecord is the contract between the two halves of
+// the push path: the turn's owner does not merely say the turn is over, it says
+// what the turn was.
+//
+// The record is taken exactly once, before the promotion below it — a queued
+// turn starts writing to the same session the moment it runs, and this turn's
+// closing words are not its own — and it travels on the frame a consumer acts
+// on, so nothing downstream has to have watched the turn go by.
+func TestSettlementStatesTheTurnsRecord(t *testing.T) {
+	h := newFakeHarness()
+	records := &recordSource{records: map[string]events.TurnRecord{
+		"session-1": {
+			Closing: &events.Closing{Text: "部署完成，线上已经是新版本。"},
+			Work:    events.Work{Calls: 6, Edits: 1},
+		},
+	}}
+	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4, Records: records})
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
+	defer sub.Close()
+
+	if _, err := s.Submit(context.Background(), "session-1", nil); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	h.nextStart(t).finish()
+
+	states := collect(t, bus, sub, 2)
+	settled := states[len(states)-1]
+	if settled.State != turns.StateCompleted {
+		t.Fatalf("settled state = %q, want %q", settled.State, turns.StateCompleted)
+	}
+	if settled.Record.Closing == nil || settled.Record.Closing.Text != "部署完成，线上已经是新版本。" {
+		t.Errorf("the settlement states no closing message: %+v", settled.Record)
+	}
+	if settled.Record.Work != (events.Work{Calls: 6, Edits: 1}) {
+		t.Errorf("work = %+v, want the count the bridge took", settled.Record.Work)
+	}
+	if len(records.taken) != 1 {
+		t.Errorf("the record was taken %d times, want once per settlement", len(records.taken))
+	}
+}
+
+// TestRunningTurnStatesNoRecord: the record describes a turn that has finished.
+// A running frame that carried one would invite a consumer to treat a turn in
+// flight as concluded.
+func TestRunningTurnStatesNoRecord(t *testing.T) {
+	h := newFakeHarness()
+	s, bus := newScheduler(t, h, turns.Options{QueueDepth: 4})
+	sub := bus.Subscribe(events.Cursor{Generation: bus.Generation()}, nil).Subscription
+	defer sub.Close()
+
+	if _, err := s.Submit(context.Background(), "session-1", nil); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	for _, state := range collect(t, bus, sub, 1) {
+		if state.State == turns.StateRunning && (state.Record.Closing != nil || state.Record.Work.Calls != 0) {
+			t.Errorf("a running turn carries a record: %+v", state.Record)
+		}
+	}
+	h.nextStart(t).finish()
+}

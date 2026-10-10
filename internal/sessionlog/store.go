@@ -197,6 +197,15 @@ type Meta struct {
 	// TurnRunning is true when the log's last turn boundary was a start: the
 	// session is being written to right now, by whoever holds it.
 	TurnRunning bool `json:"turnRunning,omitempty"`
+	// TurnStartedAt is when the last turn boundary that was a start was
+	// recorded. Zero means the log does not say — an older harness, or a
+	// boundary written without a timestamp.
+	//
+	// It is what lets a follower state a turn's own duration and extent rather
+	// than "since I started watching". It deliberately outlives the turn's end,
+	// because the frame that settles a turn is about *that* turn: clearing it at
+	// `turn/end` would leave the settlement with nothing to measure from.
+	TurnStartedAt time.Time `json:"turnStartedAt,omitzero"`
 	// Origin is the harness's own classification of the session, read from the
 	// log header: OriginSubagent for a delegated child, empty for a session a
 	// person opened. It is what tells the two apart downstream — a child's turn

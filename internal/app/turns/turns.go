@@ -100,8 +100,28 @@ type Options struct {
 	// MaxConcurrent caps how many turns run across all sessions at once. Zero
 	// means the only bound is the per-session queue.
 	MaxConcurrent int
+	// Records states what a turn accumulated, when the harness's own stream is
+	// where that fact lives. The settlement carries it, so that a consumer never
+	// has to reconstruct a turn from the frames it happened to see. Nil means
+	// the settlements this scheduler publishes state no record: a deployment
+	// with no bridge to ask, which is every test that does not care.
+	Records RecordSource
 	// Now is injectable for tests.
 	Now func() time.Time
+}
+
+// RecordSource hands over what a session's turn accumulated.
+//
+// The interface is declared here, by the party that needs the answer, and
+// implemented by the bridge — which is where an ACP session's messages and tool
+// calls exist. The alternative, a scheduler that watched the bus for its own
+// turns, would be a second consumer of a stream it already publishes to, and
+// would reintroduce exactly the reconstruction this replaces.
+//
+// Take rather than read: the caller is settling a turn, so the answer belongs to
+// that turn and to no later one.
+type RecordSource interface {
+	TakeTurn(sessionID string) events.TurnRecord
 }
 
 // Scheduler admits and runs prompts. It is safe for concurrent use.
@@ -113,6 +133,8 @@ type Scheduler struct {
 	depth   int
 	max     int
 	now     func() time.Time
+	// records may be nil, in which case settlements state no record.
+	records RecordSource
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -168,6 +190,7 @@ func New(opts Options) *Scheduler {
 		depth:    opts.QueueDepth,
 		max:      opts.MaxConcurrent,
 		now:      opts.Now,
+		records:  opts.Records,
 		sessions: map[string]*session{},
 	}
 }
@@ -378,8 +401,15 @@ func (s *Scheduler) run(t *turn) {
 	cancel()
 
 	state, detail := settle(t, stopReason, err)
+	// Taken before the promotion below: the next queued turn starts writing to
+	// the same record the moment it runs, and this turn's closing words are not
+	// its own.
+	var record events.TurnRecord
+	if s.records != nil {
+		record = s.records.TakeTurn(t.sessionID)
+	}
 	next, behind, moved := s.advance(t)
-	s.publishSettled(t, state, detail, behind)
+	s.publishSettled(t, state, detail, behind, record)
 	// A promotion moves everything behind it, and a client has no way to learn
 	// that a queue shifted until something tells it.
 	for _, queued := range moved {
@@ -522,7 +552,14 @@ func (s *Scheduler) publish(t *turn, behind int) {
 }
 
 // publishSettled emits a settled turn, with the queue depth it leaves behind.
-func (s *Scheduler) publishSettled(t *turn, state, detail string, behind int) {
+//
+// The record rides along because a settlement is the turn's own statement about
+// itself: "this is over" and "this is what it was" are one fact, and a consumer
+// given only the first has to reconstruct the second from whatever frames it
+// happened to see — which is how a notification came to quote a narration from
+// seven minutes earlier, or to report the 105 calls it had watched as though the
+// turn had made 105. See events.TurnRecord.
+func (s *Scheduler) publishSettled(t *turn, state, detail string, behind int, record events.TurnRecord) {
 	s.bus.Publish(events.TypeTurnState, t.sessionID, events.TurnState{
 		TurnID:     t.id,
 		State:      state,
@@ -530,6 +567,7 @@ func (s *Scheduler) publishSettled(t *turn, state, detail string, behind int) {
 		StartedAt:  utc(t.startedAt),
 		QueuedAt:   utc(t.queuedAt),
 		QueueDepth: behind,
+		Record:     record,
 	})
 }
 

@@ -80,7 +80,7 @@ type Message struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	// Answer is the model's own closing message for the turn — what the work
-	// concluded, in the words it concluded with.
+	// concluded, in the words it concluded with, as the settlement stated it.
 	//
 	// It is the reason a chat channel exists, and it is deliberately *not* part
 	// of the lock-screen payload: see forLockScreen.
@@ -104,8 +104,8 @@ type Message struct {
 	// Outcome is the settled word — completed, failed, cancelled, expired —
 	// carried separately so a client can colour a row without parsing prose.
 	Outcome string `json:"outcome,omitempty"`
-	// DurationMS is how long the work ran, and it is zero when nobody knows:
-	// a turn this process attached to mid-flight has no start to subtract, and
+	// DurationMS is how long the work ran, and it is zero when nobody knows: a
+	// settlement whose producer stated no start has nothing to subtract, and
 	// "0s" would be a claim rather than a silence.
 	DurationMS int64 `json:"durationMs,omitempty"`
 }
