@@ -33,6 +33,14 @@ type Options struct {
 	Binary string
 	// Profile is the ACP profile name. The shipped default is "acp".
 	Profile string
+	// Args overrides the child's whole command line. Empty means the default,
+	// which is `--profile <Profile>`.
+	//
+	// It exists because how the child is *composed* is a deployment decision that
+	// belongs to whoever builds these options, not to the ACP adapter: the
+	// gateway mounts its question answerer with a generated `--patch` overlay,
+	// and this adapter has no business knowing what a question is.
+	Args []string
 	// Home is DSH_HOME. It must match the desktop install so that the phone and
 	// the desktop share one session store.
 	Home string
@@ -205,7 +213,7 @@ func (a *Adapter) spawn(ctx context.Context) error {
 
 	proc, err := startProcess(processConfig{
 		Binary: a.opts.Binary,
-		Args:   []string{"--profile", a.opts.Profile},
+		Args:   a.childArgs(),
 		Env:    a.childEnv(),
 		Dir:    a.opts.WorkingDir,
 	}, a.logger)
@@ -370,6 +378,14 @@ func (a *Adapter) setState(state harness.State, detail string) {
 	if a.opts.States != nil {
 		a.opts.States.PublishState(state, detail)
 	}
+}
+
+// childArgs is the child's command line.
+func (a *Adapter) childArgs() []string {
+	if len(a.opts.Args) > 0 {
+		return a.opts.Args
+	}
+	return []string{"--profile", a.opts.Profile}
 }
 
 // childEnv builds the child's environment.

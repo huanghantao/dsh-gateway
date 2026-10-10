@@ -64,6 +64,16 @@ const (
 	// "a decision you made earlier applied here", and a client that folded them
 	// together would show an automated yes as a fresh human judgement.
 	TypeApprovalGranted Type = "approval.granted"
+	// TypeQuestionRequested reports that the agent has stopped to ask a human
+	// something and is waiting for the answer.
+	TypeQuestionRequested Type = "question.requested"
+	// TypeQuestionResolved reports how a question ended: answered by a device,
+	// or withdrawn because nobody answered, the turn was stopped, or the gateway
+	// is going away. It is one frame rather than two because a client's only
+	// action in every case is to take the card down — but the payload's
+	// answeredBy distinguishes the cases, and a client that showed "you answered"
+	// for a question that timed out would be lying to the operator.
+	TypeQuestionResolved Type = "question.resolved"
 	// TypeTurnState reports turn lifecycle.
 	TypeTurnState Type = "turn.state"
 	// TypeHarnessState reports the child process lifecycle.

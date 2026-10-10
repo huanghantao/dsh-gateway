@@ -14,7 +14,7 @@
  *   is simply to never proxy a request through anything that would forge it.
  */
 
-import { decodeApprovalList, decodeChanges, decodeDevice, decodeDeviceList, decodeGrantList, decodeModels, decodePrincipal, decodeProblem, decodeReceipt, decodeRevertReport, decodeSession, decodeSessionList, decodeTranscript, decodeTranscriptSearch, decodeTrashList, decodeTriage, decodeTurn, decodeWorkspaceList, isRecord } from "./decode.js";
+import { decodeApprovalList, decodeChanges, decodeDevice, decodeDeviceList, decodeGrantList, decodeModels, decodePrincipal, decodeProblem, decodeQuestionList, decodeReceipt, decodeRevertReport, decodeSession, decodeSessionList, decodeTranscript, decodeTranscriptSearch, decodeTrashList, decodeTriage, decodeTurn, decodeWorkspaceList, isRecord } from "./decode.js";
 import type {
   Approval,
   ApprovalGrant,
@@ -30,6 +30,8 @@ import type {
   PromptResponse,
   PushKey,
   PushSubscriptionRequest,
+  Question,
+  QuestionAnswer,
   Readiness,
   RevertReport,
   Session,
@@ -61,6 +63,10 @@ export const ERROR_CODES = {
   imagesUnsupported: "images_unsupported",
   unsupportedImageType: "unsupported_image_type",
   approvalClosed: "approval_closed",
+  /** The question was already answered — by another device, or by this one twice. */
+  questionAnswered: "question_answered",
+  /** The question is no longer pending: it expired or the asker withdrew it. */
+  questionClosed: "question_closed",
   unauthenticated: "unauthenticated",
   forbidden: "forbidden",
   notFound: "not_found",
@@ -577,6 +583,44 @@ export const api = {
   /** Withdrawing one takes effect on the next request that would have matched. */
   async revokeGrant(id: string, signal?: AbortSignal): Promise<void> {
     await send(`/approvals/grants/${encodeURIComponent(id)}`, { method: "DELETE", ...(signal === undefined ? {} : { signal }) });
+  },
+
+  /* ------------------------------------------------------------ questions */
+
+  /**
+   * The questions waiting for a person.
+   *
+   * Fetched rather than only held from the stream, for the same reason approvals
+   * are: a `question.requested` frame that arrived while the socket was down
+   * would otherwise leave an agent blocked with nothing on screen to unblock it.
+   */
+  async questions(signal?: AbortSignal): Promise<readonly Question[]> {
+    const raw = await send("/questions", { method: "GET", ...(signal === undefined ? {} : { signal }) });
+    return decodeQuestionList(raw);
+  },
+
+  /**
+   * Answers one question, or skips it.
+   *
+   * `selected` must quote the offered labels exactly: the model matches its own
+   * strings, so a client that "tidied" one is answered with `400 unknown_option`
+   * and loses the whole answer set with it. An empty `selected` plus an empty
+   * `custom` is a skip, and a question left out of `answers` is filled in as
+   * skipped by the server — which is why a partial set is a valid submission.
+   *
+   * `409 question_answered` means it was already answered and `409
+   * question_closed` that it expired or was withdrawn; both mean the card is
+   * stale. A `400` carries `unknown_option`, `unknown_question`,
+   * `too_many_selections`, `duplicate_answer` or `question_id_required`, and
+   * means this client sent something the contract does not allow — the server's
+   * `detail` names which, and the question is still pending.
+   */
+  async answer(questionId: string, answers: readonly QuestionAnswer[], signal?: AbortSignal): Promise<void> {
+    await send(`/questions/${encodeURIComponent(questionId)}`, {
+      method: "POST",
+      body: { answers },
+      ...(signal === undefined ? {} : { signal }),
+    });
   },
 
   /* --------------------------------------------------------------- health */

@@ -34,6 +34,11 @@ import type {
   ModelOption,
   ModelsResponse,
   Problem,
+  Question,
+  QuestionAnswer,
+  QuestionItem,
+  QuestionOption,
+  QuestionResolved,
   ReasoningEffortOption,
   ServerEvent,
   Session,
@@ -596,6 +601,115 @@ export function decodeApprovalList(value: unknown): readonly Approval[] {
     .filter((a): a is Approval => a !== null);
 }
 
+/* ------------------------------------------------------------- questions */
+
+function decodeQuestionOption(value: unknown): QuestionOption | null {
+  if (!isRecord(value)) return null;
+  const label = asStringOrNull(field(value, "label"));
+  // The label is the string an answer has to quote back, so an option without
+  // one cannot be chosen at all: rendering it as a choice would offer the
+  // operator something whose only possible answer the server rejects as
+  // `unknown_option`.
+  if (label === null) return null;
+  return {
+    label,
+    description: asString(field(value, "description"), ""),
+    // Presentation only, and deliberately separate from the label above: the
+    // suffix stays in the string the model matches on.
+    recommended: asBoolean(field(value, "recommended"), false),
+  };
+}
+
+function decodeQuestionItem(value: unknown): QuestionItem | null {
+  if (!isRecord(value)) return null;
+  const id = asStringOrNull(field(value, "id"));
+  const question = asStringOrNull(field(value, "question"));
+  // Both are required to answer at all: `id` is what an answer names, and the
+  // text is the only thing that tells a reader what is being asked. Half a
+  // question is not a question, so it is dropped rather than guessed at.
+  if (id === null || question === null) return null;
+  return {
+    id,
+    header: asString(field(value, "header"), ""),
+    question,
+    detail: asString(field(value, "detail"), ""),
+    options: asArray(field(value, "options"))
+      .map(decodeQuestionOption)
+      .filter((o): o is QuestionOption => o !== null),
+    multiSelect: asBoolean(field(value, "multiSelect"), false),
+  };
+}
+
+/**
+ * Decodes one pending question.
+ *
+ * A request with no usable item returns `null` rather than an empty card: the
+ * sheet is modal and blocking, so a card with nothing answerable would hold the
+ * screen for a question that cannot be answered. Ignoring the frame strands
+ * nothing — the broker's own timeout still resolves the question on the server,
+ * and the model is told nobody answered.
+ */
+export function decodeQuestion(value: unknown): Question | null {
+  if (!isRecord(value)) return null;
+  const id = asStringOrNull(field(value, "id"));
+  if (id === null) return null;
+  const items = asArray(field(value, "items"))
+    .map(decodeQuestionItem)
+    .filter((item): item is QuestionItem => item !== null);
+  if (items.length === 0) return null;
+  return {
+    id,
+    sessionId: asString(field(value, "sessionId"), ""),
+    items,
+    requestedAt: asString(field(value, "requestedAt"), ""),
+    expiresAt: asString(field(value, "expiresAt"), ""),
+  };
+}
+
+/** Decodes `GET /questions`: the questions waiting on a person. */
+export function decodeQuestionList(value: unknown): readonly Question[] {
+  if (!isRecord(value)) return [];
+  return asArray(field(value, "questions"))
+    .map(decodeQuestion)
+    .filter((q): q is Question => q !== null);
+}
+
+function decodeAnswer(value: unknown): QuestionAnswer | null {
+  if (!isRecord(value)) return null;
+  const id = asStringOrNull(field(value, "id"));
+  if (id === null) return null;
+  return {
+    id,
+    // Absent and empty mean the same thing on the wire — a skipped question —
+    // so the decoder does not distinguish them either.
+    selected: asArray(field(value, "selected")).filter((label): label is string => typeof label === "string"),
+    custom: asString(field(value, "custom"), ""),
+  };
+}
+
+/**
+ * Decodes how a question ended.
+ *
+ * `answers` is empty unless a person answered; the three reasons nobody did
+ * travel in `answeredBy` itself, which is why the two cases can be told apart
+ * without a second field.
+ */
+function decodeQuestionResolved(value: unknown): QuestionResolved | null {
+  if (!isRecord(value)) return null;
+  const id = asStringOrNull(field(value, "id"));
+  if (id === null) return null;
+  return {
+    id,
+    // Absent when the ask had no session; nothing downstream branches on the
+    // difference between that and an empty id.
+    sessionId: asString(field(value, "sessionId"), ""),
+    answeredBy: asString(field(value, "answeredBy"), ""),
+    answers: asArray(field(value, "answers"))
+      .map(decodeAnswer)
+      .filter((a): a is QuestionAnswer => a !== null),
+  };
+}
+
 /* --------------------------------------------------------------- changes */
 
 function decodeHunk(value: unknown): ChangeHunk | null {
@@ -772,6 +886,9 @@ function decodeSnapshot(value: unknown): SnapshotData {
     approvals: asArray(field(source, "approvals"))
       .map(decodeApproval)
       .filter((a): a is Approval => a !== null),
+    questions: asArray(field(source, "questions"))
+      .map(decodeQuestion)
+      .filter((q): q is Question => q !== null),
   };
 }
 
@@ -923,6 +1040,14 @@ export function decodeServerEvent(value: unknown): ServerEvent | null {
         input: asString(field(source, "input"), ""),
       };
       return { ...envelope, type, data: granted };
+    }
+    case "question.requested": {
+      const question = decodeQuestion(data);
+      return question === null ? null : { ...envelope, type, data: question };
+    }
+    case "question.resolved": {
+      const resolved = decodeQuestionResolved(data);
+      return resolved === null ? null : { ...envelope, type, data: resolved };
     }
     case "turn.state":
       return { ...envelope, type, data: decodeTurnState(data) };

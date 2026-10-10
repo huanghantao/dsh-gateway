@@ -42,6 +42,9 @@ import type {
   CurationDecision,
   ModelsResponse,
   PromptBlock,
+  Question,
+  QuestionAnswer,
+  QuestionResolved,
   RevertReport,
   ServerEvent,
   Session,
@@ -90,6 +93,45 @@ function grantedNotice(granted: ApprovalGranted): string {
   const tool = granted.tool === "" ? "A tool" : granted.tool;
   const scope = granted.grant.scope === "exact" ? "this exact call" : `${tool} in this session`;
   return `Auto-approved by your standing grant: ${scope}.`;
+}
+
+/**
+ * The first thing a question asks, in one line.
+ *
+ * This is what names the question later: an activity row that said only "A
+ * question" would tell a reader nothing about what they missed, and the model's
+ * own heading is a better label than anything this app could invent from an ask
+ * id. Bounded because a model wrote it and the activity list lives in the
+ * device's storage.
+ */
+function firstQuestion(question: Question): string {
+  const item = question.items[0];
+  if (item === undefined) return "";
+  const header = item.header.trim();
+  return (header === "" ? item.question.trim() : `${header}: ${item.question.trim()}`).slice(0, 200);
+}
+
+/**
+ * One line about a question nobody answered.
+ *
+ * The three reasons are told apart because they are three different stories: a
+ * question nobody saw, a turn that was stopped, and a gateway that went away.
+ * Collapsing them into "no answer" would hide the only one of them the operator
+ * cannot infer for themselves.
+ */
+function unansweredNotice(decision: QuestionResolved): string {
+  switch (decision.answeredBy) {
+    case "timeout":
+      return "Nobody answered the question in time, so the agent carried on without an answer.";
+    case "cancelled":
+      return "The question was withdrawn — the turn that asked it ended — so the agent carried on without an answer.";
+    case "shutdown":
+      return "The gateway restarted before the question was answered, so the agent carried on without one.";
+    default:
+      // A reason this client has not been taught still has to read as the one
+      // thing that is certain: the answer never arrived.
+      return "The question ended without an answer, so the agent carried on without one.";
+  }
 }
 
 /**
@@ -182,6 +224,7 @@ export interface Ctx {
   loadModels(): Promise<void>;
   loadDevices(): Promise<void>;
   loadApprovals(): Promise<void>;
+  loadQuestions(): Promise<void>;
   dropQueued(turnId: string): Promise<void>;
   changes(sessionId: string): Promise<SessionChanges>;
   revert(sessionId: string, paths: readonly string[]): Promise<RevertReport>;
@@ -213,6 +256,14 @@ export interface Ctx {
   releaseSession(): Promise<void>;
 
   decideApproval(approval: Approval, optionId: string): Promise<void>;
+  /**
+   * Answers a question, or skips parts of it.
+   *
+   * The caller builds the answers — the sheet owns the paging and the drafts —
+   * and this owns the one rule that outlives any of them: a question that is
+   * already gone is dismissed rather than reported as a failure to send.
+   */
+  answerQuestion(question: Question, answers: readonly QuestionAnswer[]): Promise<void>;
 
   createSession(workspace: string, model: string | null, reasoningEffort: string | null): Promise<void>;
   updateSessionModel(id: string, model: string | null, reasoningEffort: string | null): Promise<void>;
@@ -394,6 +445,33 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     detail: outcome === "waiting" ? "Waiting for your decision." : "Nobody answered, so the tool was refused.",
   });
 
+  /**
+   * One question the agent asked, or the ending of one.
+   *
+   * The ending carries its own id rather than reusing the ask's. An activity id
+   * is a re-delivery guard — the same frame arriving twice must not become two
+   * rows — and sharing one would make that guard swallow the ending instead: the
+   * row would keep saying "waiting for your answer" about a question that was
+   * answered or expired, which is the one claim this record must not make.
+   */
+  const questionActivity = (
+    sessionId: string,
+    summary: string,
+    outcome: Outcome,
+    detail: string,
+    time: string,
+    id: string,
+  ): Activity => ({
+    id: `question:${id}`,
+    kind: "question",
+    actor: { kind: "system", name: "" },
+    outcome,
+    sessionId,
+    time,
+    summary,
+    detail,
+  });
+
   let noticeTimer = 0;
 
   const setNotice = (text: string | null): void => {
@@ -455,6 +533,9 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         sessionsCursor: null,
         devices: [],
         approvals: [],
+        questions: [],
+        questionBusyId: null,
+        questionError: null,
         grants: [],
         grantsError: null,
         active: null,
@@ -568,6 +649,24 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     } catch (error) {
       const message = fail(error, "Could not load pending approvals.");
       if (message !== "") store.patch({ approvalError: message });
+    }
+  };
+
+  /**
+   * Loads the questions waiting for a person.
+   *
+   * Replaced wholesale rather than merged, for the same reason approvals are:
+   * this is the recovery path for a frame that arrived while the socket was
+   * down, so the server's list is the truth about what is still pending — a
+   * question answered on another device must disappear from this one.
+   */
+  const loadQuestions = async (): Promise<void> => {
+    try {
+      const questions = await api.questions();
+      store.set((state) => ({ ...state, questions }));
+    } catch (error) {
+      const message = fail(error, "Could not load pending questions.");
+      if (message !== "") store.patch({ questionError: message });
     }
   };
 
@@ -762,7 +861,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     // Subscribe before fetching so no frame from the opening turn is missed;
     // the transcript fetch then establishes the baseline the frames extend.
     events.subscribe(sessionId);
-    await Promise.all([loadSessionMeta(sessionId), loadTranscript(sessionId), loadApprovals()]);
+    await Promise.all([loadSessionMeta(sessionId), loadTranscript(sessionId), loadApprovals(), loadQuestions()]);
   };
 
   const closeSession = (): void => {
@@ -921,6 +1020,40 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     }
   };
 
+  /**
+   * Sends an answer set.
+   *
+   * Both conflict codes mean the card is stale — `question_answered` for one
+   * already decided, `question_closed` for one that expired or was withdrawn —
+   * and neither is a failure the reader can act on, so the card is dismissed and
+   * the notice says what happened. Unlike an approval there is nothing to
+   * refuse: a question nobody answers is simply unanswered, so losing the race
+   * costs the answer and nothing else.
+   */
+  const answerQuestion = async (question: Question, answers: readonly QuestionAnswer[]): Promise<void> => {
+    store.patch({ questionBusyId: question.id, questionError: null });
+    try {
+      await api.answer(question.id, answers);
+      store.set((state) => ({
+        ...state,
+        questions: state.questions.filter((item) => item.id !== question.id),
+        questionBusyId: null,
+      }));
+    } catch (error) {
+      if (error instanceof ApiError && (error.is(ERROR_CODES.questionAnswered) || error.is(ERROR_CODES.questionClosed))) {
+        store.set((state) => ({
+          ...state,
+          questions: state.questions.filter((item) => item.id !== question.id),
+          questionBusyId: null,
+        }));
+        setNotice("That question had already been answered or had expired.");
+        return;
+      }
+      const message = fail(error, "The answer could not be sent.");
+      if (message !== "") store.patch({ questionBusyId: null, questionError: message });
+    }
+  };
+
   const createSession = async (workspace: string, model: string | null, reasoningEffort: string | null): Promise<void> => {
     const session = await api.createSession({ workspace, model, reasoningEffort });
     store.set((state) => withSession(state, session));
@@ -993,6 +1126,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
 
   const handleStale = (): void => {
     void loadApprovals();
+    void loadQuestions();
     void loadSessions();
     refetchConversation();
   };
@@ -1006,6 +1140,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         // conversation the reader has paged back through would be neither free
         // nor harmless, so it is not done on every connect.
         void loadApprovals();
+        void loadQuestions();
         void loadSessions();
         return;
 
@@ -1020,6 +1155,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         // and this says what has *happened* (rows the client never received).
         // Only the transcript server can answer the second.
         void loadApprovals();
+        void loadQuestions();
         void loadSessions();
         refetchConversation();
         return;
@@ -1034,6 +1170,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
           ...state,
           harness: event.data.harness,
           approvals: event.data.approvals,
+          questions: event.data.questions,
           active: applySnapshot(state.active, turns, active?.sessionId ?? null),
         }));
         return;
@@ -1171,6 +1308,69 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
         return;
       }
 
+      case "question.requested": {
+        const question = event.data;
+        // Recorded whether or not its session is on screen: the reader who needs
+        // the record is the one who was elsewhere when the agent stopped.
+        if (question.sessionId !== "") {
+          record(
+            questionActivity(
+              question.sessionId,
+              firstQuestion(question),
+              "waiting",
+              "Waiting for your answer.",
+              event.time,
+              question.id,
+            ),
+          );
+        }
+        store.set((state) => {
+          // A question re-announced under the same id — the answerer retried, or
+          // a redeploy re-asked — is the same card rather than a second one.
+          const known = state.questions.some((item) => item.id === question.id);
+          return { ...state, questions: known ? state.questions : [...state.questions, question], questionError: null };
+        });
+        return;
+      }
+
+      case "question.resolved": {
+        const decision = event.data;
+        // `answeredBy` is a device id when a person answered and one of the
+        // three reasons otherwise, so the reasons are the whole test.
+        const unanswered =
+          decision.answeredBy === "timeout" || decision.answeredBy === "cancelled" || decision.answeredBy === "shutdown";
+        const pending = store.state.questions.find((item) => item.id === decision.id);
+        const summary = pending === undefined ? "" : firstQuestion(pending);
+        if (decision.sessionId !== "") {
+          // Every ending is recorded, answered ones included, and each with its
+          // own id: a question that was answered leaves the ask's row behind, and
+          // leaving it as the last word would keep saying "waiting" about a
+          // decision that has been made. The wording is careful about *who*
+          // answered — the id is a device, which is not necessarily this one.
+          const mine = store.state.principal?.id === decision.answeredBy;
+          record(
+            questionActivity(
+              decision.sessionId,
+              summary,
+              unanswered ? (decision.answeredBy === "cancelled" ? "cancelled" : "expired") : "completed",
+              unanswered ? unansweredNotice(decision) : mine ? "You answered." : "Answered on another device.",
+              event.time,
+              `${decision.id}:${decision.answeredBy}`,
+            ),
+          );
+        }
+        store.set((state) => {
+          const questions = state.questions.filter((item) => item.id !== decision.id);
+          const active = state.active;
+          if (!unanswered || active === null || (decision.sessionId !== "" && active.sessionId !== decision.sessionId)) {
+            return { ...state, questions, questionBusyId: null };
+          }
+          const feed = appendNotice(active.feed, unansweredNotice(decision), event.time, event.seq);
+          return { ...state, questions, questionBusyId: null, active: { ...active, feed } };
+        });
+        return;
+      }
+
       case "turn.state": {
         // Three cases, not one. A queued prompt is not the running one; a
         // running one may be a queued prompt being promoted; and a settled one
@@ -1273,7 +1473,9 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
           return { ...state, harness: { state: "failed", detail: "The gateway is not ready." } };
         });
       });
-      await Promise.all([loadSessions(), loadWorkspaces(), loadModels(), loadApprovals()]);
+      // Questions are loaded beside approvals: both are things a person has to
+      // answer, and both can be missed while the socket is down.
+      await Promise.all([loadSessions(), loadWorkspaces(), loadModels(), loadApprovals(), loadQuestions()]);
     } catch (error) {
       if (error instanceof ApiError && error.isUnauthenticated) {
         requirePairing();
@@ -1285,7 +1487,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
   };
 
   const refresh = async (): Promise<void> => {
-    await Promise.all([loadSessions(), loadApprovals()]);
+    await Promise.all([loadSessions(), loadApprovals(), loadQuestions()]);
   };
 
   return {
@@ -1308,6 +1510,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     loadModels,
     loadDevices,
     loadApprovals,
+    loadQuestions,
     dropQueued,
     changes,
     revert,
@@ -1321,6 +1524,7 @@ export function createContext(store: AppStore, events: EventClient): Ctx {
     cancelTurn,
     releaseSession,
     decideApproval,
+    answerQuestion,
     createSession,
     updateSessionModel,
     revokeDevice,

@@ -78,6 +78,17 @@ func waitReady(t *testing.T, a *acp.Adapter) {
 // startHarness boots an adapter against the real dsh, skipping when unavailable.
 func startHarness(t *testing.T, sink *recorder) *acp.Adapter {
 	t.Helper()
+	return startHarnessWith(t, sink, nil)
+}
+
+// startHarnessWith is startHarness with a chance to tune the options.
+//
+// The question test needs it because it mounts an answerer the gateway installs
+// as a `--patch` overlay, and how the child is composed is an option rather than
+// a constant precisely so that a test can do this without a second harness
+// bootstrap that could drift from this one.
+func startHarnessWith(t *testing.T, sink *recorder, tune func(*acp.Options)) *acp.Adapter {
+	t.Helper()
 
 	if _, err := exec.LookPath("dsh"); err != nil {
 		t.Skip("dsh is not on PATH; skipping ACP integration test")
@@ -94,7 +105,7 @@ func startHarness(t *testing.T, sink *recorder) *acp.Adapter {
 		t.Skipf("DSH_HOME %s is not present; skipping", home)
 	}
 
-	a, err := acp.New(acp.Options{
+	options := acp.Options{
 		Binary:         "dsh",
 		Profile:        "acp",
 		Home:           home,
@@ -105,7 +116,11 @@ func startHarness(t *testing.T, sink *recorder) *acp.Adapter {
 		Logger:         logx.Discard(),
 		Updates:        sink,
 		Permissions:    &denier{called: make(chan harness.PermissionRequest, 4)},
-	})
+	}
+	if tune != nil {
+		tune(&options)
+	}
+	a, err := acp.New(options)
 	if err != nil {
 		t.Fatalf("acp.New: %v", err)
 	}

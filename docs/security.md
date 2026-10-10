@@ -450,6 +450,41 @@ indistinguishable from you, so they can approve — and can create a scoped gran
 which is a standing authorisation. Approvals bound the *agent's* autonomy and
 provide the audit trail; they are not a second factor.
 
+### 6.4 Questions, and the one credential that is not a device
+
+The agent can also stop and ask a question — a choice, a confirmation, something
+it needs before it can continue. That capability does not exist on the ACP
+surface, so the gateway supplies it: a small plugin of its own, mounted into the
+harness child with a `--patch` overlay the gateway generates, which forwards each
+question to the gateway over loopback
+([ADR 9](adr/0009-answer-agent-questions-through-an-installed-plugin.md)).
+
+Three properties of that path are security-relevant, and each is deliberate:
+
+* **The bridge route takes a per-process bearer token, not a device credential.**
+  `/internal/questions` is the only route a client cannot reach with a cookie or
+  a paired-device token. The token is 256 bits minted at startup, written to
+  `<stateDir>/dsh/ask-answerer.endpoint.json` with mode 0600, and compared in
+  constant time. An empty token never authenticates anything, so switching the
+  capability off cannot degrade into "anything with an empty Authorization header
+  is trusted".
+* **The file is the capability's whole authority.** It is readable only by the
+  operator's own account, and the plugin that reads it runs inside the harness
+  child, which the operator started. An attacker who can read it is already the
+  operator.
+* **A question is not a permission.** Answering one supplies information to the
+  model; it authorises nothing. Everything the agent then does still goes through
+  §6, so the worst an answered question can cause is a better-informed agent —
+  which is why a question may expire unanswered without failing closed, while an
+  approval may not.
+
+Residual risk, stated plainly: the harness child can ask the phone anything, and
+the answer goes into the model's context. The model is the one that chose the
+question, so a prompt-injected model can use this to talk the operator into
+typing something into the conversation — the same exposure as the model asking in
+prose, with the difference that the card looks like the product asking rather
+than the model. The gateway shows the session it came from for that reason.
+
 ---
 
 ## 7. Rate limiting and lockout

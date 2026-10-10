@@ -780,6 +780,75 @@ expiresAt, uses }`, where `scope` is `tool` or `exact`. Grants live in memory,
 die with their session, and are never written down — a rule that outlived a
 restart would be one nobody remembers agreeing to.
 
+## Questions
+
+The agent can stop and ask the operator something, rather than only asking
+permission: `ask_user_question` carries one or more questions, each with optional
+numbered choices, a multi-select flag, and free text. The gateway publishes a
+`question.requested` event and the agent blocks until an answer arrives, the
+question expires, or the turn is stopped.
+
+```json
+{
+  "id": "9f1c…",
+  "sessionId": "session-…",
+  "requestedAt": "…",
+  "expiresAt": "…",
+  "items": [
+    {
+      "id": "style",
+      "header": "回答风格",
+      "question": "你希望我平时回答的风格是？",
+      "detail": "…",
+      "multiSelect": false,
+      "options": [
+        { "label": "简洁直接，结论先行 (Recommended)", "description": "先给结论。", "recommended": true },
+        { "label": "详细解释，带推导过程", "description": "把思路和权衡讲清楚。" }
+      ]
+    }
+  ]
+}
+```
+
+Answering quotes the option labels **exactly** as they arrived — the model matches
+its own labels — and a free-text answer is not a fifth option: for a single-select
+question `custom` overrides the selection, for a multi-select one it supplements
+it.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/questions` | Questions waiting on a person, across all sessions. |
+| `POST` | `/questions/{id}` | Answer: `{ "answers": [{ "id": "style", "selected": ["详细解释，带推导过程"], "custom": "…" }] }`. |
+
+An item left out of `answers` is recorded as **skipped** (`"selected": []`), and
+`{ "answers": [] }` skips the whole request, so a client can submit what the
+operator filled in without inventing a value for the rest. Answering an unknown,
+expired, or already-answered question returns `409 question_closed` (or
+`question_answered` when it was answered and is still inside the replay window).
+A label the question never offered returns `400 unknown_option`, a second label on
+a single-select question `400 too_many_selections`, and a question id the request
+never asked `400 unknown_question` — each leaving the question open, so a
+malformed client cannot resolve it by accident.
+
+`recommended` is derived by the gateway from the `(Recommended)` suffix DSH's own
+tool asks the model to append. The label keeps its suffix on the wire and in the
+answer; the flag exists so a client can draw a badge instead of printing it.
+
+**Silence is not a decision.** If nobody answers within `session.questionTimeout`
+(10 minutes by default) the question is withdrawn, `answeredBy` is `timeout`, and
+the model is told that nobody answered — unlike an approval, which is *refused*,
+because there is nothing here to refuse. `answeredBy` is `cancelled` when the turn
+was stopped or the harness child went away, and `shutdown` when the gateway
+itself is going away; the last of those is the one case where the answerer asks
+again rather than giving up, which is what makes a redeploy mid-question a pause
+instead of a lost decision.
+
+A question reachable from the harness child only: the gateway mounts the answerer
+that asks it with a generated profile overlay, and answers it at a loopback route
+that takes a per-process bearer token instead of a device credential. See
+[ADR 9](adr/0009-answer-agent-questions-through-an-installed-plugin.md) and §6.4
+of [security.md](security.md).
+
 ## Event stream
 
 ### `GET /events` (WebSocket)
@@ -819,10 +888,12 @@ Server frames:
 | `approval.requested` | See above. |
 | `approval.resolved` | `data = { id, optionId, decidedBy, tool, sessionId, grantId }`. `decidedBy` is `operator` when a person answered, and `timeout` or `shutdown` when the tool was refused because nobody did — a client that rendered those the same way would tell the operator their agent stopped for a reason it did not. |
 | `approval.granted` | A standing grant answered a request, so no prompt was shown. `data = { grant, tool, input }`. It is separate from `approval.resolved` because the two say different things: one is "you decided", this is "a decision you made earlier applied here". |
+| `question.requested` | See above. `data` is the pending question, exactly as `GET /questions` returns it. |
+| `question.resolved` | How a question ended: `data = { id, sessionId, answeredBy, answers? }`. `answeredBy` is the device id that answered, or `timeout`, `cancelled` or `shutdown` when nobody did — a client that rendered those as "you answered" would tell the operator their agent got an answer it never got. `answers` is present only when a person answered, and it is complete: every question in the request appears, with the skipped ones present and empty. |
 | `turn.state` | `data = { turnId, state: "queued" \| "running" \| "completed" \| "cancelled" \| "failed", position?, queueDepth?, queuedAt?, startedAt?, stopReason?, detail?, subagent? }`. `startedAt` is sent on every state including the settled ones, because a phone that reconnects mid-turn needs the start rather than the duration so far — the event that announced it may be long past the replay window. A queued ticket is republished whenever the queue moves. `subagent` is true when the turn belongs to a session the harness created to answer a delegation rather than one a person opened; the log watcher is the only producer that can know, and it is what lets a consumer keep a child's turns out of the notification policy. |
 | `harness.state` | The DSH child process: `data = { state: "starting" \| "ready" \| "restarting" \| "failed", detail? }`. |
 | `resync` | The cursor could not be honoured. `data = { reason }`, where the reason is one of `the gateway restarted`, `cursor is ahead of this gateway`, `replay window exceeded`, `events were dropped for a slow client`. It is always followed by a `snapshot`. A client refetches what it is showing. |
-| `snapshot` | The present state, sent after a `resync` and when a connection first subscribes to a session. `data = { generation, seq, time, harness, turns, approvals }`, where `turns` is one `{ sessionId, running, queued }` per session with a turn and `approvals` is exactly what `GET /approvals` returns. Everything at or below `seq` is already reflected in the snapshot; frames after it are deltas, so a client that applies the snapshot and then accepts only strictly greater sequence numbers converges without a gap and without a duplicate. A session absent from `turns` has no turn — a claim a snapshot can make and an event stream cannot. |
+| `snapshot` | The present state, sent after a `resync` and when a connection first subscribes to a session. `data = { generation, seq, time, harness, turns, approvals, questions }`, where `turns` is one `{ sessionId, running, queued }` per session with a turn, `approvals` is exactly what `GET /approvals` returns, and `questions` is exactly what `GET /questions` returns. Everything at or below `seq` is already reflected in the snapshot; frames after it are deltas, so a client that applies the snapshot and then accepts only strictly greater sequence numbers converges without a gap and without a duplicate. A session absent from `turns` has no turn — a claim a snapshot can make and an event stream cannot. |
 | `gateway.draining` | The gateway is going away on purpose: a redeploy, not a fault. `data = { reason }`. A turn already running keeps running; the client reconnects to the successor. It is a distinct frame from `harness.state` because it says the opposite about the agent. |
 
 Client frames:

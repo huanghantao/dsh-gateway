@@ -21,6 +21,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
 	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn/devicetoken"
@@ -33,6 +34,9 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/pairing"
 	"github.com/huanghantao/dsh-gateway/internal/sessionlog"
 )
+
+// testBridgeToken is the credential the answerer plugin presents in tests.
+const testBridgeToken = "bridge-token-for-tests"
 
 // fakeHarness satisfies harness.Harness without spawning anything.
 //
@@ -340,6 +344,9 @@ func newTestServer(t *testing.T) *testServer {
 	broker := approvals.New(approvals.Options{Timeout: time.Minute, Bus: bus, Logger: logger, Now: now})
 	t.Cleanup(broker.Close)
 
+	questionBroker := questions.New(questions.Options{Timeout: time.Minute, Bus: bus, Logger: logger, Now: now})
+	t.Cleanup(questionBroker.Close)
+
 	// The gateway's own state, so a test can drive a deploy rather than only
 	// describe one.
 	life := lifecycle.New(bus, logger)
@@ -351,8 +358,13 @@ func newTestServer(t *testing.T) *testServer {
 		Lifecycle: life,
 		Leases:    leases,
 		Approvals: broker,
-		Turns:     scheduler,
-		Harness:   driver,
+		Questions: questionBroker,
+		// A fixed token rather than a minted one, so a test can present it: the
+		// only properties that matter are that it is required and that nothing
+		// else is accepted.
+		QuestionToken: testBridgeToken,
+		Turns:         scheduler,
+		Harness:       driver,
 		// The store is real so deletion has files to move; the projector's own
 		// behaviour is covered in its own package.
 		Sessions:  historyStore,
@@ -560,6 +572,15 @@ func TestMutatingRoutesRejectAForeignOrigin(t *testing.T) {
 		}
 		if rt.pattern == "/api/v1/pair" {
 			continue // pairing has no credential to protect yet
+		}
+		if rt.pattern == PathQuestions {
+			// The question bridge carries no cookie: its caller is the answerer
+			// plugin inside the harness child, which presents a bearer token
+			// minted for this process. There is no ambient credential for a
+			// foreign origin to borrow, which is the entire thing this check
+			// exists to prevent — and the route's own credential is covered by
+			// TestQuestionBridgeRefusesEveryOtherCaller.
+			continue
 		}
 		mutating++
 

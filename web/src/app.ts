@@ -24,6 +24,7 @@ import type { ServerEvent } from "./types.js";
 import { mountApprovals } from "./views/approval.js";
 import { mountConversation } from "./views/conversation.js";
 import { mountPair } from "./views/pair.js";
+import { mountQuestions } from "./views/question.js";
 import { mountSessions } from "./views/sessions.js";
 import { mountActivity } from "./views/activity.js";
 import { mountSettings } from "./views/settings.js";
@@ -384,6 +385,9 @@ export function main(): void {
   // Mounted on `body`, not inside `#app`: the shell is made inert while a decision
   // is pending, and the sheet has to stay interactive through that.
   mountApprovals(document.body, ctx);
+  // Beside it for the same reason: an agent blocked on a question must be
+  // answerable from whatever screen the reader happens to be on.
+  mountQuestions(document.body, ctx);
   registerServiceWorker();
   bindNotificationClicks();
 

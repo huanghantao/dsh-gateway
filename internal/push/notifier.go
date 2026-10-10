@@ -9,6 +9,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 )
 
@@ -265,6 +266,10 @@ func (n *Notifier) handle(ctx context.Context, event events.Event) {
 		n.handleApproval(ctx, event)
 	case events.TypeApprovalResolved:
 		n.handleApprovalResolved(ctx, event)
+	case events.TypeQuestionRequested:
+		n.handleQuestion(ctx, event)
+	case events.TypeQuestionResolved:
+		n.handleQuestionResolved(ctx, event)
 	case events.TypeHarnessState:
 		n.handleHarness(ctx, event)
 	default:
@@ -705,6 +710,85 @@ func (n *Notifier) handleApprovalResolved(ctx context.Context, event events.Even
 		Outcome:   "expired",
 		Summary:   strings.TrimSpace(decision.Tool),
 	}, "high", true)
+}
+
+// handleQuestion reports an agent that has stopped to ask something.
+//
+// It interrupts for the same reason an approval does: the agent is blocked, and
+// the only thing that unblocks it is a person looking at the card. What it
+// deliberately does *not* carry is the question itself, and that is a privacy
+// decision rather than a formatting one. A question is text a model wrote — it
+// may name a file, a customer, a symptom — and the two places a notification
+// goes are the lock screen and, if one is configured, a chat webhook. Neither is
+// where this project puts model output; PRIVACY.md says so, and an earlier draft
+// of this handler said otherwise. What is left is what the policy allows: the
+// session's label, and a count.
+func (n *Notifier) handleQuestion(ctx context.Context, event events.Event) {
+	view, ok := event.Data.(questions.View)
+	if !ok {
+		n.mismatch(event, "questions.View")
+		return
+	}
+	actor := Actor{Kind: ActorMain}
+	body := "The agent is waiting for your answer."
+	if label := n.label(ctx, event.SessionID); label != "" {
+		body = fmt.Sprintf("%s · %s", body, label)
+	}
+	n.notify(ctx, Message{
+		Title: "The agent is asking",
+		Body:  body,
+		URL:   conversationURL(event.SessionID),
+		// One question replaces the last notification for the same one, and a
+		// second question in another session does not stack behind it.
+		Tag:       "question-" + view.ID,
+		SessionID: event.SessionID,
+		Actor:     &actor,
+		Outcome:   "waiting",
+		Summary:   questionCount(len(view.Items)),
+	}, "high", true)
+}
+
+// handleQuestionResolved reports a question that ran out of time.
+//
+// A question a person answered is not news: they were holding the phone. A
+// withdrawal is, and only one kind of it: a stopped turn was stopped by the
+// operator, and a redeploy re-asks — but a question that expired was one nobody
+// ever saw, and the model has by then carried on with an assumption of its own.
+// That is exactly the case the product must not lose, because nothing else in
+// the conversation says it happened.
+func (n *Notifier) handleQuestionResolved(ctx context.Context, event events.Event) {
+	decision, ok := event.Data.(questions.Decision)
+	if !ok {
+		n.mismatch(event, "questions.Decision")
+		return
+	}
+	if decision.AnsweredBy != questions.ByTimeout {
+		return
+	}
+	actor := Actor{Kind: ActorSystem}
+	body := "The agent gave up waiting and carried on without an answer."
+	if label := n.label(ctx, event.SessionID); label != "" {
+		body = fmt.Sprintf("%s · %s", body, label)
+	}
+	n.notify(ctx, Message{
+		Title:     "Question expired",
+		Body:      body,
+		URL:       conversationURL(event.SessionID),
+		Tag:       "question-" + decision.ID,
+		SessionID: event.SessionID,
+		Actor:     &actor,
+		Outcome:   "expired",
+		Summary:   "unanswered",
+	}, "high", true)
+}
+
+// questionCount phrases how much is waiting, which is all a notification may say
+// about a question: see handleQuestion.
+func questionCount(items int) string {
+	if items <= 1 {
+		return "1 question"
+	}
+	return fmt.Sprintf("%d questions", items)
 }
 
 // handleHarness reports the child process giving up.

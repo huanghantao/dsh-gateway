@@ -13,6 +13,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/errx"
 	"github.com/huanghantao/dsh-gateway/internal/httpcore"
 )
@@ -287,6 +288,11 @@ func (h *eventsHandler) resync(ctx context.Context, reason events.ResyncReason) 
 type snapshotFrame struct {
 	events.Snapshot
 	Approvals []approvals.View `json:"approvals"`
+	// Questions are pending agent questions, exactly as GET /questions returns
+	// them. They ride here rather than in events.Snapshot for the same reason
+	// approvals do: the bus is a leaf and cannot describe a domain type, and the
+	// transport that serialises both is this one.
+	Questions []questions.View `json:"questions"`
 }
 
 // scope reports the sessions this connection asked for. An empty result means

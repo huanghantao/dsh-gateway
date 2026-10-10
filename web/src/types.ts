@@ -494,6 +494,89 @@ export interface ApprovalGranted {
   readonly input: string;
 }
 
+/* --------------------------------------------------------------- questions */
+
+/**
+ * One choice a question offered.
+ *
+ * `label` is the exact string an answer has to quote back, because the model
+ * matches its own labels. `recommended` is presentation only: the harness writes
+ * its "(Recommended)" convention *into* the label, and the server derives this
+ * flag from that suffix so a client can draw a badge instead of printing the
+ * words twice. Stripping the suffix from the wire value would break the match,
+ * which is why the badge is drawn from this flag and not from the text.
+ */
+export interface QuestionOption {
+  readonly label: string;
+  /** One sentence of trade-off, when the model supplied one. */
+  readonly description: string;
+  readonly recommended: boolean;
+}
+
+/** One question inside a request, in the model's order. */
+export interface QuestionItem {
+  readonly id: string;
+  /** A short heading, such as "Approach". Empty when the model gave none. */
+  readonly header: string;
+  readonly question: string;
+  /**
+   * Supporting context that is not a choice: a plan under review, a diff, the
+   * text of a decision. It belongs with the question rather than among the
+   * options, and a client that rendered it as one would invent an answer the
+   * model never offered.
+   */
+  readonly detail: string;
+  /** Absent or empty means free text is the only way to answer. */
+  readonly options: readonly QuestionOption[];
+  /** Several labels may come back for this question. */
+  readonly multiSelect: boolean;
+}
+
+/**
+ * A question the agent is blocked on.
+ *
+ * `items` is plural because one ask can carry several questions — the sheet pages
+ * through them — and `id` is the answerer's id for the whole ask, stable across
+ * its retries: a re-announced question is the same card rather than a second one.
+ */
+export interface Question {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly items: readonly QuestionItem[];
+  readonly requestedAt: string;
+  readonly expiresAt: string;
+}
+
+/**
+ * One question's answer.
+ *
+ * The two fields are not alternatives. For a single-select question `custom`
+ * overrides `selected`; for a multi-select one it supplements it. Both empty is
+ * how a skipped question is written, and it is a real answer rather than a
+ * missing one: the server fills any question a client leaves out the same way.
+ */
+export interface QuestionAnswer {
+  readonly id: string;
+  readonly selected: readonly string[];
+  readonly custom: string;
+}
+
+/**
+ * How a question ended.
+ *
+ * `answeredBy` carries most of the meaning: a device id means a person answered,
+ * and "timeout", "cancelled" or "shutdown" mean nobody did. A client that
+ * rendered those as "you answered" would be reporting a decision that was never
+ * made — an expired question is one nobody ever saw.
+ */
+export interface QuestionResolved {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly answeredBy: string;
+  /** Empty unless a person answered. */
+  readonly answers: readonly QuestionAnswer[];
+}
+
 /* ------------------------------------------------------------------- events */
 
 export interface HelloData {
@@ -605,6 +688,8 @@ export interface SnapshotData {
   readonly turns: readonly SessionTurnSnapshot[];
   /** Decisions waiting on a person, as `GET /approvals` would return them. */
   readonly approvals: readonly Approval[];
+  /** Questions waiting on a person, as `GET /questions` would return them. */
+  readonly questions: readonly Question[];
 }
 
 export interface SessionTurnSnapshot {
@@ -648,6 +733,8 @@ export type ServerEvent =
   | (EventEnvelope & { readonly type: "approval.requested"; readonly data: Approval })
   | (EventEnvelope & { readonly type: "approval.resolved"; readonly data: ApprovalResolved })
   | (EventEnvelope & { readonly type: "approval.granted"; readonly data: ApprovalGranted })
+  | (EventEnvelope & { readonly type: "question.requested"; readonly data: Question })
+  | (EventEnvelope & { readonly type: "question.resolved"; readonly data: QuestionResolved })
   | (EventEnvelope & { readonly type: "turn.state"; readonly data: TurnStateData })
   | (EventEnvelope & { readonly type: "harness.state"; readonly data: HarnessStateData })
   | (EventEnvelope & { readonly type: "snapshot"; readonly data: SnapshotData })

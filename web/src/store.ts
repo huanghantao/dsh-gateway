@@ -22,7 +22,7 @@
  */
 
 import { loadActivities, loadReadAt, unreadCount, type Activity } from "./activity.js";
-import type { Approval, ApprovalGrant, DeploymentLimits, Device, Features, FeedItem, HarnessStateData, ModelsResponse, Session, TokenUsage, Turn, Workspace } from "./types.js";
+import type { Approval, ApprovalGrant, DeploymentLimits, Device, Features, FeedItem, HarnessStateData, ModelsResponse, Question, Session, TokenUsage, Turn, Workspace } from "./types.js";
 
 /**
  * What a gateway that has not answered `GET /me` yet can do: nothing optional.
@@ -140,6 +140,17 @@ export interface AppState {
   readonly devicesError: string | null;
 
   readonly approvals: readonly Approval[];
+  /**
+   * Questions the agent is blocked on, oldest first.
+   *
+   * Held beside the approvals for the same reason: the sheet that answers them
+   * is mounted at the app root, so it has to be renderable from any screen — and
+   * a client that only kept them in a view would lose one asked while the reader
+   * was elsewhere.
+   */
+  readonly questions: readonly Question[];
+  readonly questionBusyId: string | null;
+  readonly questionError: string | null;
   /** Standing authorisations, loaded on demand for the approvals screen. */
   readonly grants: readonly ApprovalGrant[];
   readonly grantsError: string | null;
@@ -265,6 +276,9 @@ function createAppState(): AppState {
     approvals: [],
     approvalBusyId: null,
     approvalError: null,
+    questions: [],
+    questionBusyId: null,
+    questionError: null,
     active: null,
     notice: null,
     activities,

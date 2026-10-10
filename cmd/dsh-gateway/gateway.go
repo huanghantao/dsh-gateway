@@ -21,6 +21,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
 	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/atomicfile"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
@@ -28,6 +29,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/authn/ratelimit"
 	"github.com/huanghantao/dsh-gateway/internal/config"
 	"github.com/huanghantao/dsh-gateway/internal/curation"
+	"github.com/huanghantao/dsh-gateway/internal/dshplugin"
 	"github.com/huanghantao/dsh-gateway/internal/edge"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/httpapi/v1"
@@ -49,6 +51,22 @@ func (s *stringList) String() string { return fmt.Sprintf("%v", []string(*s)) }
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+// loopbackURL renders the address the harness child reaches this gateway on.
+//
+// The child runs on the same machine, so it is handed the loopback address
+// rather than anything the deployment exposes: this is the one client that must
+// not go out through the tunnel and back.
+func loopbackURL(listen, path string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return "http://127.0.0.1" + path
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + path
 }
 
 // runFlags holds the command-line overrides. Flags win over the file and the
@@ -288,6 +306,49 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		Now:      time.Now,
 	})
 	defer approvalsBroker.Close()
+
+	questionsBroker := questions.New(questions.Options{
+		Timeout: cfg.Session.QuestionTimeout.Std(),
+		Bus:     bus,
+		Logger:  logger,
+		Now:     time.Now,
+	})
+	defer questionsBroker.Close()
+
+	// The question capability is two halves prepared by two processes. The agent
+	// host mounts the answerer — it is what composes the child's command line —
+	// and this one publishes where the answerer may reach it, under a token
+	// minted for this process alone. Both derive their half from the same
+	// configuration, so neither can be running while the other is switched off.
+	questionChild, err := dshplugin.Start(cfg.StateDir, cfg.DSH.Profile, cfg.DSH.Questions.Enabled)
+	if err != nil {
+		return err
+	}
+	questionToken := ""
+	if questionChild.Enabled {
+		questionToken = idgen.Token(32)
+		endpoint := dshplugin.Endpoint{
+			URL:       loopbackURL(cfg.Listen, v1.PathQuestions),
+			Token:     questionToken,
+			TimeoutMS: cfg.Session.QuestionTimeout.Std().Milliseconds(),
+		}
+		if err := questionChild.Installation.WriteEndpoint(endpoint); err != nil {
+			return err
+		}
+		logger.Info("question bridge published",
+			"url", endpoint.URL,
+			"timeout", cfg.Session.QuestionTimeout.Std().String(),
+			"endpoint_file", questionChild.Installation.EndpointPath)
+	} else {
+		// A child started while the capability was on still has the answerer
+		// mounted, and would keep reading a credential this process will not
+		// honour. Removing the file is what turns "no" into something the plugin
+		// can see, instead of a stream of rejected retries.
+		if err := os.Remove(questionChild.Installation.EndpointPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			logger.Warn("could not remove the question endpoint file",
+				"path", questionChild.Installation.EndpointPath, "error", err.Error())
+		}
+	}
 
 	// The listening socket is claimed before anything else, and the order is
 	// load-bearing rather than tidy.
@@ -598,6 +659,8 @@ func serve(ctx context.Context, cfg config.Config, configPath string, logger *lo
 		Bus:           bus,
 		Leases:        leases,
 		Approvals:     approvalsBroker,
+		Questions:     questionsBroker,
+		QuestionToken: questionToken,
 		Turns:         scheduler,
 		Harness:       harnessDriver,
 		Sessions:      history,

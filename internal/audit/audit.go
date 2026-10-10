@@ -53,6 +53,13 @@ const (
 	// EventApprovalDecided carrying a scoped option, and this is the record that
 	// it stopped applying.
 	EventApprovalGrantRevoked Event = "approval.grant_revoked"
+	// EventQuestionAnswered records an operator answering what the agent asked.
+	//
+	// It is the counterpart of EventApprovalDecided for a different kind of
+	// decision: an approval authorises an action, a question supplies
+	// information, and the two are audited separately because "what did I tell
+	// it" and "what did I let it do" are different questions about a session.
+	EventQuestionAnswered Event = "question.answered"
 	// EventWorkspaceReverted records an undo writing to the operator's files.
 	//
 	// It is the only audit event describing a change this gateway made to a

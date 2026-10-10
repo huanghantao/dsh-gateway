@@ -8,6 +8,7 @@ package v1
 
 import (
 	"context"
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
 	"github.com/huanghantao/dsh-gateway/internal/app/lease"
 	"github.com/huanghantao/dsh-gateway/internal/app/lifecycle"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 	"github.com/huanghantao/dsh-gateway/internal/audit"
 	"github.com/huanghantao/dsh-gateway/internal/authn"
@@ -63,6 +65,14 @@ type Deps struct {
 	Bus       *events.Bus
 	Leases    *lease.Manager
 	Approvals *approvals.Broker
+	// Questions parks the agent's questions until a person answers them. It is
+	// always present: `dsh.questions.enabled` decides whether the harness child
+	// is given the answerer that asks, not whether this API can carry one.
+	Questions *questions.Broker
+	// QuestionToken authenticates the answerer plugin at the bridge. It is
+	// minted per process, lives only in the endpoint file the plugin reads, and
+	// is empty when nothing minted one — which authenticates nothing.
+	QuestionToken string
 	// Turns admits and runs prompts. It is the single answer to "is a turn
 	// running", which is why the lease consults it rather than keeping a flag.
 	Turns    *turns.Scheduler
@@ -245,6 +255,20 @@ func (s *Server) routes() []route {
 		// own verb rather than a query parameter on cancel.
 		{method: "DELETE", pattern: "/api/v1/sessions/{id}/queue/{turnId}", handler: authed(s.handleDropQueued)},
 
+		{method: "GET", pattern: "/api/v1/questions", handler: authed(s.handleListQuestions)},
+		{method: "POST", pattern: "/api/v1/questions/{id}", handler: authed(s.handleAnswerQuestion)},
+
+		// The agent-facing half of the question capability. It carries no
+		// device credential, because its caller is not a device: it is the
+		// answerer plugin inside the harness child, which the gateway started
+		// and which presents the per-process token from its endpoint file. The
+		// route is therefore not `public` — a request without that token is
+		// rejected here, and the credential-wall test covers it like any other.
+		{method: "POST", pattern: PathQuestions,
+			handler: s.rateLimited(s.bridgeAuthorized(http.HandlerFunc(s.handleQuestionBridge))),
+			reason: "authenticates the harness answerer with a per-process bearer token " +
+				"that exists only in a 0600 file the gateway wrote for it"},
+
 		{method: "GET", pattern: "/api/v1/approvals", handler: authed(s.handleListApprovals)},
 		{method: "POST", pattern: "/api/v1/approvals/{id}", handler: authed(s.handleDecideApproval)},
 		// Standing authorisations are a resource, not a detail of the sheet: the
@@ -393,9 +417,8 @@ func (s *Server) rateLimited(next http.Handler) http.Handler {
 // a future app has no cookie jar to rely on.
 func (s *Server) extractCredential(r *http.Request) (authn.Credential, bool) {
 	if header := r.Header.Get("Authorization"); header != "" {
-		scheme, value, found := strings.Cut(header, " ")
-		if found && strings.EqualFold(scheme, "Bearer") && strings.TrimSpace(value) != "" {
-			return authn.Credential{Kind: authn.KindBearer, Value: strings.TrimSpace(value)}, true
+		if token := bearerFrom(r); token != "" {
+			return authn.Credential{Kind: authn.KindBearer, Value: token}, true
 		}
 		// A malformed Authorization header is a client bug, not an invitation to
 		// fall back to the cookie: silently ignoring it would mask the bug.
@@ -437,6 +460,32 @@ func (s *Server) originAllowed(r *http.Request) bool {
 		trimmed = trimmed[i+3:]
 	}
 	return strings.EqualFold(trimmed, host)
+}
+
+// bearerFrom returns the bearer token a request presented, or "" when it
+// presented none. A header that is not a bearer credential is treated as absent
+// here; extractCredential is where that difference decides an outcome.
+func bearerFrom(r *http.Request) string {
+	scheme, value, found := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+// validBridgeToken reports whether a presented token is the one this process
+// minted.
+//
+// An empty expectation is never satisfied, so switching the capability off cannot
+// degrade into "any request with an empty Authorization header is trusted", and
+// the comparison is constant time: this token is a capability for driving the
+// operator's agent, which is worth the two lines that stop it being guessed one
+// byte at a time.
+func validBridgeToken(expected, presented string) bool {
+	if expected == "" || presented == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(presented)) == 1
 }
 
 // isMutating reports whether a method changes state.

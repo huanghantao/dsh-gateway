@@ -32,8 +32,14 @@ export interface Actor {
 /** How a piece of work ended. */
 export type Outcome = "completed" | "failed" | "cancelled" | "expired" | "waiting";
 
-/** What kind of thing happened, which is what a row's icon and verb come from. */
-export type ActivityKind = "turn" | "task" | "approval" | "harness";
+/**
+ * What kind of thing happened, which is what a row's icon and verb come from.
+ *
+ * `question` is the agent stopping to ask something, which is its own kind
+ * rather than an approval: an approval is a decision about a tool, and a
+ * question is content the agent needs before it can carry on.
+ */
+export type ActivityKind = "turn" | "task" | "approval" | "question" | "harness";
 
 export interface Activity {
   /** Stable, so a re-delivered frame cannot double a row. */

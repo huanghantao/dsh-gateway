@@ -57,6 +57,14 @@ established by reading and probing a real installation rather than assumed:
   from the agent's own record of its edits: which files, how many lines, and the
   changes themselves. Undo is available when you turn it on, exact-match only,
   and never while the agent is running.
+- **The agent can ask you something and wait for the answer.** A question is not
+  a permission: it carries choices — numbered, with the model's recommendation
+  marked — a multi-select flag, and room to type your own answer, across as many
+  questions as the model asked. The card appears wherever you are in the app, and
+  the agent resumes with your answer. A question nobody answers is *withdrawn*
+  rather than guessed at, and the model is told so plainly. DSH's own ACP profile
+  has no seam for this, so the gateway installs a small answerer plugin into the
+  harness child it drives; see [ADR 9](docs/adr/0009-answer-agent-questions-through-an-installed-plugin.md).
 - **A follow-up is not lost.** Prompts typed while a turn runs are queued rather
   than refused, and a turn that has been going a while shows how long and what it
   is doing now.

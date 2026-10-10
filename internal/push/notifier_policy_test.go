@@ -8,6 +8,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 	"github.com/huanghantao/dsh-gateway/internal/push"
@@ -97,6 +98,70 @@ func TestExpiredApprovalIsReported(t *testing.T) {
 	if expired.Tag != request.Tag {
 		t.Errorf("tag = %q, want %q: the expiry replaces the request it belongs to, "+
 			"rather than leaving a stale prompt on the lock screen", expired.Tag, request.Tag)
+	}
+}
+
+// TestAQuestionNotifiesWithoutCarryingTheQuestion is the privacy half of the
+// question notification.
+//
+// A question is text a model wrote, and a notification goes to a lock screen and
+// to any chat webhook that is configured. Neither is where this project puts
+// model output — PRIVACY.md says so — so the notification says that the agent is
+// waiting, by which session, and how much is waiting. The question itself stays
+// on the card in the app.
+func TestAQuestionNotifiesWithoutCarryingTheQuestion(t *testing.T) {
+	bus, rec := notifierFor(t, push.NotifierOptions{})
+
+	// A real broker, so the payload is the one production publishes and the
+	// assertion is about the notifier rather than about a hand-built event.
+	// A short window, so the expiry this test also covers is an event the broker
+	// reaches on its own rather than one the test forces by shutting it down:
+	// a shutdown is not an expiry, and the notifier is deliberately silent about
+	// it, because the answerer asks again against the successor.
+	broker := questions.New(questions.Options{Timeout: 800 * time.Millisecond, Bus: bus, Logger: logx.Discard(), Now: time.Now})
+	defer broker.Close()
+
+	const secret = "the customer's account number is 1234"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = broker.Request(context.Background(), questions.Request{
+			ID: "ask-1", SessionID: "session-1",
+			Items: []questions.Item{{
+				ID: "q1", Header: "确认", Question: secret,
+				Options: []questions.Option{{Label: "是"}, {Label: "否"}},
+			}},
+		})
+	}()
+
+	waitFor(t, func() bool { return len(rec.received()) >= 1 }, "the question notification")
+	message := rec.received()[0]
+
+	for name, field := range map[string]string{"title": message.Title, "body": message.Body, "summary": message.Summary} {
+		if strings.Contains(field, secret) || strings.Contains(field, "1234") {
+			t.Errorf("the %s carries the question's text: %q", name, field)
+		}
+	}
+	if !strings.Contains(message.Title, "asking") {
+		t.Errorf("title = %q, want it to say the agent is asking something", message.Title)
+	}
+	if message.Summary != "1 question" {
+		t.Errorf("summary = %q, want a count: it is what a webhook's meta line shows", message.Summary)
+	}
+	if message.Tag != "question-ask-1" {
+		t.Errorf("tag = %q, want the question's own tag so a second one does not stack", message.Tag)
+	}
+
+	// An expired question is the case the operator would otherwise never learn
+	// about: the model asked something, nobody saw it, and it carried on.
+	waitFor(t, func() bool { return len(rec.received()) >= 2 }, "the expiry notification")
+	<-done
+	expired := rec.received()[1]
+	if !strings.Contains(expired.Title, "expired") {
+		t.Errorf("title = %q, want the expiry named", expired.Title)
+	}
+	if expired.Tag != message.Tag {
+		t.Errorf("tag = %q, want %q: the expiry replaces the request it belongs to", expired.Tag, message.Tag)
 	}
 }
 

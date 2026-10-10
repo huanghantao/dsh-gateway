@@ -98,6 +98,7 @@ web/
       conversation.ts   screen 3
       feedrows.ts       row kinds -> nodes (message, tool, tool run, notice)
       approval.ts       screen 4 (mounted globally, not inside a view)
+      question.ts       screen 4b — the agent's question (also mounted globally)
       settings.ts       screen 5
       activity.ts       screen 6, reached from the app bar's bell
       ui.ts             shared badge / bottom sheet / select
@@ -205,9 +206,20 @@ replayed via `?since=`; backoff is equal-jitter, 500 ms doubling to a 10 s cap;
 every 20 s. `subscribe`/`unsubscribe` are sent on session open/close and
 re-sent after every reconnect.
 
-**`resync` and `hello`** both trigger a refetch of approvals, sessions and — if
-a conversation is open — its metadata and transcript. `hello` counts because a
+**`resync` and `hello`** both trigger a refetch of approvals, questions, sessions
+and — if a conversation is open — its metadata and transcript. `hello` counts because a
 fresh connection may replay from a sequence the client never had.
+
+**Questions.** An agent that asks something is blocked until it is answered, so
+the sheet is modal — but not `alertdialog`: an approval is an interruption with a
+safe default, a question is content to read and answer, and several of them are
+paged one at a time with the answers collected locally and sent once. The
+recommendation badge is presentation only: the label keeps the harness's
+`(Recommended)` suffix on the wire, because the model matches the exact string it
+wrote, and the badge replaces the suffix on screen. Two things follow from
+"blocked": the composer for that session refuses to send (a prompt would queue
+behind a turn that cannot finish), and the sheet survives a reconnect because
+`snapshot` carries the questions still pending.
 
 **Leases.** Sending a prompt attaches, so the app never leases on open. While a
 session is leased the conversation's header carries a "Held" chip explaining that

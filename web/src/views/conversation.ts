@@ -40,7 +40,7 @@ import { mountFeedRow } from "./feedrows.js";
 import { openChangesSheet } from "./changes.js";
 import { openSheet, type Sheet } from "./ui.js";
 import type { ActiveSession, AppStore } from "../store.js";
-import type { FeedItem, HarnessStateData, Session, Turn } from "../types.js";
+import type { FeedItem, HarnessStateData, Question, Session, Turn } from "../types.js";
 
 /**
  * The composer's fallback bound, used only until `GET /me` answers.
@@ -268,6 +268,19 @@ function runningHere(active: ActiveSession | null): boolean {
 function runningElsewhere(active: ActiveSession | null): boolean {
   if (active === null || active.session?.leased === true) return false;
   return active.turn?.state === "running" || active.session?.busy === true;
+}
+
+/**
+ * True when this session has a question waiting on a person.
+ *
+ * A question blocks the agent: it is stopped mid-turn until the answer arrives,
+ * so a prompt sent now would queue behind a turn that cannot finish. The
+ * composer says so rather than accepting text it can only park — the question
+ * sheet is on screen anyway, which is where the reader has to go first.
+ */
+function questionPending(active: ActiveSession | null, questions: readonly Question[]): boolean {
+  if (active === null) return false;
+  return questions.some((question) => question.sessionId === active.sessionId);
 }
 
 export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
@@ -677,12 +690,21 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     // A prompt would be refused while another writer owns the session, so the
     // button says so instead of failing after the fact.
     const held = runningElsewhere(active);
+    // A question blocks the agent for as long as it takes to answer, so the same
+    // treatment applies: the composer must not offer to send into a turn that
+    // cannot finish first.
+    const asking = questionPending(active, store.state.questions);
     const bytes = promptBytes();
     const limit = maxPromptBytes();
     const over = bytes > limit;
     const empty = textarea.value.trim() === "" && attached.length === 0;
 
-    if (over) {
+    if (asking) {
+      // Said in the counter's own place, above the box: the reason Send is dead
+      // has to be visible, or the button just looks broken.
+      counter.textContent = "The agent is waiting for your answer.";
+      counter.className = "counter is-warn";
+    } else if (over) {
       counter.textContent = `Message is ${Math.round(bytes / 1024)} KiB; the limit is ${Math.round(limit / 1024)} KiB.`;
       counter.className = "counter is-over";
     } else if (bytes / limit >= COUNTER_VISIBLE_AT) {
@@ -703,7 +725,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     // typed yet. So an empty draft disables Send only at rest, where sending
     // what is in the box is the button's whole job.
     const queueing = queueOffered();
-    send.disabled = held || over || (running && !queueing) || (!running && empty);
+    send.disabled = held || asking || over || (running && !queueing) || (!running && empty);
     send.hidden = running && !queueing;
     stop.hidden = !running;
     // `field-sizing: content` handles growth on current browsers; `rows` is the
@@ -723,6 +745,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     if (promptBytes() > maxPromptBytes()) return;
     const active = store.state.active;
     if (active === null || runningElsewhere(active)) return;
+    if (questionPending(active, store.state.questions)) return;
     if (runningHere(active) && !queueOffered()) return;
     // The composer is cleared only once the server accepts the prompt, so a
     // `409 prompt_in_flight` leaves the text — and the images — where the user
@@ -1083,6 +1106,16 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     },
   );
 
+  // A question is answered on a sheet outside this view, so the turn that was
+  // blocked by it starts moving again in a commit this view never sees: the
+  // composer has to hear about it to offer Send again.
+  const offQuestions = store.select(
+    (state) => state.questions,
+    () => {
+      render(activeSnapshot);
+    },
+  );
+
   // The shell opens the session before mounting this view, and the subscription
   // above has already painted it. The guard covers the one ordering that can
   // slip through: a direct hit on the URL while bootstrap was still resolving.
@@ -1096,6 +1129,7 @@ export function mountConversation(root: HTMLElement, ctx: Ctx): () => void {
     offHarness();
     offModels();
     offFeatures();
+    offQuestions();
     offBack();
     offOlder();
     offStop();

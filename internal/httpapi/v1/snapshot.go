@@ -5,6 +5,7 @@ import (
 
 	"github.com/huanghantao/dsh-gateway/internal/app/approvals"
 	"github.com/huanghantao/dsh-gateway/internal/app/events"
+	"github.com/huanghantao/dsh-gateway/internal/app/questions"
 	"github.com/huanghantao/dsh-gateway/internal/app/turns"
 )
 
@@ -32,6 +33,7 @@ func (s *Server) snapshot(scope []string, at uint64) snapshotFrame {
 			Turns:      s.turnSnapshot(scope),
 		},
 		Approvals: s.approvalSnapshot(scope),
+		Questions: s.questionSnapshot(scope),
 	}
 }
 
@@ -119,6 +121,30 @@ func (s *Server) approvalSnapshot(scope []string) []approvals.View {
 		inScope[id] = struct{}{}
 	}
 	out := make([]approvals.View, 0, len(pending))
+	for _, view := range pending {
+		if _, ok := inScope[view.SessionID]; ok {
+			out = append(out, view)
+		}
+	}
+	return out
+}
+
+// questionSnapshot lists the questions waiting for a person, in the shape
+// `GET /questions` returns them. It is scoped for the same reason approvals are:
+// a connection watching one session should not be handed another's questions.
+func (s *Server) questionSnapshot(scope []string) []questions.View {
+	if s.deps.Questions == nil {
+		return nil
+	}
+	pending := s.deps.Questions.List()
+	if len(scope) == 0 {
+		return pending
+	}
+	inScope := make(map[string]struct{}, len(scope))
+	for _, id := range scope {
+		inScope[id] = struct{}{}
+	}
+	out := make([]questions.View, 0, len(pending))
 	for _, view := range pending {
 		if _, ok := inScope[view.SessionID]; ok {
 			out = append(out, view)

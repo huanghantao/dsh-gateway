@@ -1793,6 +1793,187 @@ body {
   gap: 8px;
 }
 
+/* ------------------------------------------------------------- questions */
+
+/*
+ * The question sheet. It borrows the approval sheet's frame — the same backdrop,
+ * the same bottom sheet, the same countdown bar — because the two are the same
+ * kind of interruption, and a reader who has answered one should not have to
+ * learn a second layout to answer the other. What is its own is the paging: a
+ * question can be one of several, so the card carries an indicator and arrows.
+ */
+.question-host {
+  position: relative;
+  z-index: 60;
+}
+
+.question-backdrop {
+  align-items: center;
+  background: rgb(0 0 0 / 72%);
+}
+
+.question {
+  border-radius: 16px;
+  border-bottom: 1px solid var(--border);
+  border-color: var(--accent);
+  margin: 0 12px;
+  max-width: 560px;
+  padding: 16px;
+}
+
+.question-head {
+  margin-bottom: 10px;
+}
+.question-title {
+  margin: 0 0 4px;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+.question-queue {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.question-timer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.question-progress {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+/* `display: flex` above would beat the user agent's own `[hidden]` rule, so a
+   single-question card has to be told again. */
+.question-progress[hidden] {
+  display: none;
+}
+.question-progress-text {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+.question-text {
+  margin: 0 0 8px;
+  font-size: 0.98rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.question-text:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.question-detail {
+  margin: 0 0 12px;
+  padding: 10px;
+  /* A plan is longer than a phone screen and is read before answering, so it
+     scrolls inside its own box rather than pushing the choices out of reach. */
+  max-height: 30dvh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text-muted);
+  /* One step below the question above it, one above a code block. */
+  font-size: 0.9rem;
+  /* No `pre-wrap`: the detail is markdown, and the `.md-*` rules already keep
+     the line breaks that mean something. Preserving the source's newlines here
+     as well would double every blank line between blocks. */
+  overflow-wrap: anywhere;
+}
+.question-hint {
+  margin: 0 0 6px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+/* A description under a label makes a row taller than one line, so the number
+   and the control line up with the first line rather than the middle. */
+.question-option {
+  align-items: flex-start;
+}
+.question-option-number {
+  flex: 0 0 auto;
+  min-width: 1.1rem;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  font-weight: 700;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.question-option .choice-input {
+  margin-top: 3px;
+}
+.question-recommended {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  background: var(--info-bg);
+  color: var(--accent);
+  font-size: 0.68rem;
+  font-weight: 650;
+  vertical-align: middle;
+}
+/* Not `.choice-sub`: that is a monospace one-liner for a path or a command, and
+   an option's description is prose that has to wrap. */
+.question-option-sub {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+.question-free-field {
+  margin-bottom: 12px;
+}
+.question-free-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.question-free {
+  min-height: 56px;
+  resize: vertical;
+}
+.question-free-note {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.question-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* The choices read as unavailable once the clock is at zero, which is the one
+   disabled state the buttons do not already carry. */
+.question.is-blocked .question-option {
+  opacity: 0.55;
+}
+
 /* ---------------------------------------------------------------- notice */
 
 .notice-host {

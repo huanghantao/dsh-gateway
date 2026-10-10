@@ -33,6 +33,8 @@ function kindLabel(kind: Activity["kind"]): string {
       return "Delegated task";
     case "approval":
       return "Approval";
+    case "question":
+      return "Question";
     case "harness":
       return "Gateway";
     default:

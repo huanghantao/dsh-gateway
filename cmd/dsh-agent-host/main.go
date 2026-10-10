@@ -30,6 +30,7 @@ import (
 	"github.com/huanghantao/dsh-gateway/internal/agenthost/hostlink"
 	"github.com/huanghantao/dsh-gateway/internal/agenthost/hostwire"
 	"github.com/huanghantao/dsh-gateway/internal/config"
+	"github.com/huanghantao/dsh-gateway/internal/dshplugin"
 	"github.com/huanghantao/dsh-gateway/internal/harness"
 	"github.com/huanghantao/dsh-gateway/internal/logx"
 )
@@ -194,6 +195,20 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The answerer the gateway answers questions through is mounted here,
+	// because this is the process that composes the child's command line. The
+	// gateway writes the other half — where to ask — into the endpoint file whose
+	// path travels in this environment.
+	questionChild, err := dshplugin.Start(cfg.StateDir, cfg.DSH.Profile, cfg.DSH.Questions.Enabled)
+	if err != nil {
+		return fmt.Errorf("install the question answerer: %w", err)
+	}
+	if questionChild.Enabled {
+		logger.Info("question answerer mounted",
+			"plugin", questionChild.Installation.PluginPath,
+			"patch", questionChild.Installation.PatchPath)
+	}
+
 	// The child is built by the host, because it reports *to* the host. That
 	// inversion is the only reason this is a factory rather than a value.
 	host, err := agenthost.New(agenthost.Options{
@@ -202,9 +217,10 @@ func runServe(args []string) error {
 			return acp.New(acp.Options{
 				Binary:            cfg.DSH.Binary,
 				Profile:           cfg.DSH.Profile,
+				Args:              questionChild.Args,
 				Home:              cfg.DSH.Home,
 				SandboxMode:       cfg.DSH.SandboxMode,
-				ExtraEnv:          cfg.DSH.ExtraEnv,
+				ExtraEnv:          append(append([]string{}, cfg.DSH.ExtraEnv...), questionChild.Env...),
 				StartTimeout:      cfg.DSH.StartTimeout.Std(),
 				StopTimeout:       cfg.DSH.StopTimeout.Std(),
 				RestartBackoff:    cfg.DSH.RestartBackoff.Std(),

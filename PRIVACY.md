@@ -82,6 +82,12 @@ Setting `push.includeSessionName: true` adds the session's title to the few
 notification *bodies* that would otherwise say it — the approval cards. It does
 not govern the title, which names the session either way.
 
+The same rule covers the agent's *questions*. A question is text the model wrote,
+so a notification about one says only that the agent is waiting, by which session,
+and how many questions there are. The question itself is on the card in the app,
+which is where the operator answers it anyway — a lock screen can inform, but it
+cannot be answered from, and a chat webhook is a third party.
+
 ### Chat webhooks
 
 `push.webhooks` is empty by default, and that is a change from earlier revisions

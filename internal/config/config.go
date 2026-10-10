@@ -152,6 +152,27 @@ type DSH struct {
 	MaxRestartBackoff Duration `yaml:"maxRestartBackoff"`
 	// ExtraEnv is appended to the child environment, as KEY=VALUE.
 	ExtraEnv []string `yaml:"extraEnv"`
+	// Questions configures the interactive-question capability.
+	Questions Questions `yaml:"questions"`
+}
+
+// Questions configures the capability that lets the agent stop and ask the
+// operator something, rather than only asking permission.
+//
+// DeepSeek Harness exposes the model's question tool through a seam that the
+// `acp` profile composes no answerer for, so the gateway contributes one: a
+// plugin of its own, mounted with a generated `--patch` overlay. See
+// internal/dshplugin and docs/adr/0009.
+type Questions struct {
+	// Enabled installs and mounts that answerer, together with the harness's own
+	// ask_user_question tool.
+	//
+	// On by default, because an agent that cannot ask a question can only guess.
+	// It is switchable because the overlay names a package shipped by DeepSeek
+	// Harness, and a plugin row that cannot resolve fails the child's boot: on an
+	// install where that package has moved, this is the one line that brings the
+	// agent back without touching the profile by hand.
+	Enabled bool `yaml:"enabled"`
 }
 
 // Auth configures pairing, sessions, and client-address trust.
@@ -187,6 +208,16 @@ type Session struct {
 	// ApprovalTimeout bounds how long an approval waits for a human; on expiry
 	// the request is rejected (fail closed).
 	ApprovalTimeout Duration `yaml:"approvalTimeout"`
+	// QuestionTimeout bounds how long the agent waits for an answer to a
+	// question it asked. On expiry the question is withdrawn and the model is
+	// told nobody answered, which is deliberately *not* the approval's
+	// fail-closed refusal: there is nothing to refuse, only a question that went
+	// unanswered.
+	//
+	// It is longer than approvalTimeout by default, and for a reason: an
+	// approval is a tap on a sheet the operator was just pushed, while a
+	// question is read, thought about, and typed.
+	QuestionTimeout Duration `yaml:"questionTimeout"`
 	// ApprovalGrantTTL bounds how long a scoped approval lasts. Choosing a
 	// scoped option on a prompt — "this tool, in this session" — records a rule
 	// that then answers matching requests without asking again, and this is when
@@ -494,6 +525,7 @@ func Default() Config {
 			StopTimeout:       Duration(15 * time.Second),
 			RestartBackoff:    Duration(1 * time.Second),
 			MaxRestartBackoff: Duration(60 * time.Second),
+			Questions:         Questions{Enabled: true},
 		},
 		Auth: Auth{
 			CookieName:        "dsh_gw_session",
@@ -510,6 +542,7 @@ func Default() Config {
 			IdleTimeout:      Duration(5 * time.Minute),
 			PromptTimeout:    Duration(30 * time.Minute),
 			ApprovalTimeout:  Duration(5 * time.Minute),
+			QuestionTimeout:  Duration(10 * time.Minute),
 			ApprovalGrantTTL: Duration(30 * time.Minute),
 			PromptQueueDepth: 4,
 			EventBuffer:      256,
@@ -906,6 +939,10 @@ func (c Config) Validate() error {
 	}
 	if c.Session.ApprovalTimeout <= 0 {
 		fail("session.approvalTimeout: must be positive")
+	}
+	if c.Session.QuestionTimeout <= 0 {
+		fail("session.questionTimeout: must be positive; without it a question " +
+			"would either never expire or expire before it could be read")
 	}
 	if c.Session.ApprovalGrantTTL < 0 {
 		fail("session.approvalGrantTTL: must not be negative; use 0 to disable " +
